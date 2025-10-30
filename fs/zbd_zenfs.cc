@@ -26,6 +26,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <random>
 
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
@@ -59,6 +61,8 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
+  reset_count_ = 0;
+  finish_count_ = 0;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
 }
@@ -77,6 +81,8 @@ void Zone::EncodeJson(std::ostream &json_stream) {
   json_stream << "\"wp\":" << wp_ << ",";
   json_stream << "\"lifetime\":" << lifetime_ << ",";
   json_stream << "\"used_capacity\":" << used_capacity_;
+  json_stream << "\"reset_count\":" << reset_count_;
+  json_stream << "\"finish_count\":" << finish_count_;
   json_stream << "}";
 }
 
@@ -97,6 +103,7 @@ IOStatus Zone::Reset() {
 
   wp_ = start_;
   lifetime_ = Env::WLTH_NOT_SET;
+  reset_count_++;
 
   return IOStatus::OK();
 }
@@ -109,6 +116,7 @@ IOStatus Zone::Finish() {
 
   capacity_ = 0;
   wp_ = start_ + zbd_->GetZoneSize();
+  finish_count_++;
 
   return IOStatus::OK();
 }
@@ -181,6 +189,7 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
     zbd_be_ = std::unique_ptr<ZoneFsBackend>(new ZoneFsBackend(path));
     Info(logger_, "New zonefs backing: %s", zbd_be_->GetFilename().c_str());
   }
+  zenfs_parameters_.LoadParamsFromFile();
 }
 
 IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
@@ -630,17 +639,95 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
 }
 
 IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out) {
+  switch(zenfs_parameters_.empty_zone_allocator) {
+    case kSequential:
+      return AllocateEmptyZoneSequential(zone_out);
+    case kRandom:
+      return AllocateEmptyZoneRandom(zone_out);
+    case kLeastWear:
+      return AllocateEmptyZoneLeastWear(zone_out);
+    case kHotnessBased:
+      return AllocateEmptyZoneHotnessBased(zone_out);
+    default:
+      return AllocateEmptyZoneSequential(zone_out);
+  }
+}
+
+IOStatus ZonedBlockDevice::AllocateEmptyZoneSequential(Zone **zone_out) {
   IOStatus s;
   Zone *allocated_zone = nullptr;
   for (const auto z : io_zones) {
-    if (z->Acquire()) {
-      if (z->IsEmpty()) {
-        allocated_zone = z;
-        break;
-      } else {
-        s = z->CheckRelease();
-        if (!s.ok()) return s;
-      }
+    if (!z->Acquire())
+      continue;
+
+    if (z->IsEmpty()) {
+      allocated_zone = z;
+      break;
+    } 
+    else {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
+    }
+  }
+  *zone_out = allocated_zone;
+  return IOStatus::OK();
+}
+
+IOStatus ZonedBlockDevice::AllocateEmptyZoneLeastWear(Zone **zone_out) {
+  IOStatus s;
+  Zone *allocated_zone = nullptr;
+  
+  for (const auto z : io_zones) {
+    if (!z->Acquire())
+      continue;
+
+    if(!z->IsEmpty()) {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
+      continue;
+    }
+
+    // Chose this zone if no zone has been chosen yet
+    if (allocated_zone == nullptr) {
+      allocated_zone = z;
+      continue;
+    }
+
+    // Skip this zone if it's not better than the already chosen zone
+    if(allocated_zone->reset_count_ > z->reset_count_) {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
+      continue;
+    }
+
+    // A zone with a smaller reset count is found
+    s = allocated_zone->CheckRelease();
+    if (!s.ok()) return s;
+    allocated_zone = z;
+  }
+
+  *zone_out = allocated_zone;
+  return IOStatus::OK();
+}
+
+IOStatus ZonedBlockDevice::AllocateEmptyZoneRandom(Zone **zone_out) {
+  std::vector<Zone*> shuffled_io_zones(io_zones);
+  static auto rng = std::default_random_engine {};
+  std::shuffle(std::begin(shuffled_io_zones), std::end(shuffled_io_zones), rng);
+
+  IOStatus s;
+  Zone *allocated_zone = nullptr;
+  for (const auto z : shuffled_io_zones) {
+    if (!z->Acquire())
+      continue;
+
+    if (z->IsEmpty()) {
+      allocated_zone = z;
+      break;
+    } 
+    else {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
     }
   }
   *zone_out = allocated_zone;

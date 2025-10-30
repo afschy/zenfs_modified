@@ -4,7 +4,7 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-#if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 
 #include "fs_zenfs.h"
 
@@ -1927,20 +1927,20 @@ FactoryFunc<FileSystem> zenfs_filesystem_reg =
         });
 };  // namespace ROCKSDB_NAMESPACE
 
-#else
+// #else
 
-#include "rocksdb/env.h"
+// #include "rocksdb/env.h"
 
-namespace ROCKSDB_NAMESPACE {
-Status NewZenFS(FileSystem** /*fs*/, const ZbdBackendType /*backend_type*/,
-                const std::string& /*backend_name*/,
-                ZenFSMetrics* /*metrics*/) {
-  return Status::NotSupported("Not built with ZenFS support\n");
-}
-std::map<std::string, std::string> ListZenFileSystems() {
-  std::map<std::string, std::pair<std::string, ZbdBackendType>> zenFileSystems;
-  return zenFileSystems;
-}
-}  // namespace ROCKSDB_NAMESPACE
+// namespace ROCKSDB_NAMESPACE {
+// Status NewZenFS(FileSystem** /*fs*/, const ZbdBackendType /*backend_type*/,
+//                 const std::string& /*backend_name*/,
+//                 ZenFSMetrics* /*metrics*/) {
+//   return Status::NotSupported("Not built with ZenFS support\n");
+// }
+// std::map<std::string, std::string> ListZenFileSystems() {
+//   std::map<std::string, std::pair<std::string, ZbdBackendType>> zenFileSystems;
+//   return zenFileSystems;
+// }
+// }  // namespace ROCKSDB_NAMESPACE
 
-#endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)

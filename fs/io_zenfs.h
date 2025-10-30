@@ -6,7 +6,7 @@
 
 #pragma once
 
-#if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 
 #include <errno.h>
 #include <stdlib.h>
@@ -328,4 +328,4 @@ class ZonedRandomAccessFile : public FSRandomAccessFile {
 
 }  // namespace ROCKSDB_NAMESPACE
 
-#endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)

@@ -28,7 +28,7 @@ namespace fs = std::filesystem;
 
 namespace ROCKSDB_NAMESPACE {
 
-#if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 
 class ZoneSnapshot;
 class ZoneFileSnapshot;
@@ -464,7 +464,7 @@ class ZenFS : public FileSystemWrapper {
   const uint64_t GC_SLOPE = 3; /* GC agressiveness */
   void GCWorker();
 };
-#endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 
 Status NewZenFS(
     FileSystem** fs, const std::string& bdevname,

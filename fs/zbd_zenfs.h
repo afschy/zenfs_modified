@@ -7,7 +7,7 @@
 #pragma once
 
 #include <cstdint>
-#if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 
 #include <errno.h>
 #include <libzbd/zbd.h>
@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "metrics.h"
+#include "param_loader.h"
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
@@ -64,6 +65,8 @@ class Zone {
   uint64_t wp_;
   Env::WriteLifeTimeHint lifetime_;
   std::atomic<uint64_t> used_capacity_;
+  uint32_t reset_count_;
+  uint32_t finish_count_;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -172,6 +175,8 @@ class ZonedBlockDevice {
                       const std::vector<Zone *> zones);
 
  public:
+  ZenfsParamContainer zenfs_parameters_;
+
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
                             std::shared_ptr<ZenFSMetrics> metrics =
@@ -240,8 +245,13 @@ class ZonedBlockDevice {
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
   IOStatus AllocateEmptyZone(Zone **zone_out);
+  
+  IOStatus AllocateEmptyZoneSequential(Zone **zone_out);
+  IOStatus AllocateEmptyZoneRandom(Zone **zone_out);
+  IOStatus AllocateEmptyZoneLeastWear(Zone **zone_out);
+  IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out);
 };
 
 }  // namespace ROCKSDB_NAMESPACE
 
-#endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+// #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)

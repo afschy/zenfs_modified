@@ -50,6 +50,8 @@ class ZoneSnapshot {
   uint64_t capacity;
   uint64_t used_capacity;
   uint64_t max_capacity;
+  uint32_t reset_count;
+  uint32_t finish_count;
 
  public:
   ZoneSnapshot(const Zone& zone)
@@ -57,7 +59,9 @@ class ZoneSnapshot {
         wp(zone.wp_),
         capacity(zone.capacity_),
         used_capacity(zone.used_capacity_),
-        max_capacity(zone.max_capacity_) {}
+        max_capacity(zone.max_capacity_),
+        reset_count(zone.reset_count_),
+        finish_count(zone.finish_count_) {}
 };
 
 class ZoneExtentSnapshot {
