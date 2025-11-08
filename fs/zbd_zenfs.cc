@@ -638,8 +638,13 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   return IOStatus::OK();
 }
 
-IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out) {
+IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level=-1) {
+  static std::mutex mtx;
+  std::unique_lock<std::mutex> lock(mtx);
+
   switch(zenfs_parameters_.empty_zone_allocator) {
+    case kDefault:
+      return AllocateEmptyZoneDefault(zone_out);
     case kSequential:
       return AllocateEmptyZoneSequential(zone_out);
     case kRandom:
@@ -647,16 +652,45 @@ IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out) {
     case kLeastWear:
       return AllocateEmptyZoneLeastWear(zone_out);
     case kHotnessBased:
-      return AllocateEmptyZoneHotnessBased(zone_out);
+      return AllocateEmptyZoneHotnessBased(zone_out, level);
     default:
       return AllocateEmptyZoneSequential(zone_out);
   }
 }
 
-IOStatus ZonedBlockDevice::AllocateEmptyZoneSequential(Zone **zone_out) {
+IOStatus ZonedBlockDevice::AllocateEmptyZoneDefault(Zone **zone_out) {
   IOStatus s;
   Zone *allocated_zone = nullptr;
   for (const auto z : io_zones) {
+    if (!z->Acquire())
+      continue;
+
+    if (z->IsEmpty()) {
+      allocated_zone = z;
+      break;
+    } 
+    else {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
+    }
+  }
+  *zone_out = allocated_zone;
+  return IOStatus::OK();
+}
+
+IOStatus ZonedBlockDevice::AllocateEmptyZoneSequential(Zone **zone_out) {
+  static int zone_pos = 0;
+  int curr_traversed = 0;
+  
+  IOStatus s;
+  Zone *allocated_zone = nullptr;
+  while (curr_traversed < io_zones.size()) {
+    Zone* z = io_zones[zone_pos];
+    curr_traversed++;
+    zone_pos++;
+    if(zone_pos >= io_zones.size())
+      zone_pos = 0;
+
     if (!z->Acquire())
       continue;
 
@@ -734,6 +768,88 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneRandom(Zone **zone_out) {
   return IOStatus::OK();
 }
 
+IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int level) {
+  if (level <= 0)
+    return AllocateEmptyZoneLeastWear(zone_out);
+
+  std::vector<Zone *> sorted_io_zones(io_zones);
+  std::sort(sorted_io_zones.begin(), sorted_io_zones.end(), [](const Zone* &a, const Zone* &b)
+            { return a->reset_count_ < b->reset_count_; });
+
+  double interval = 1.00 * sorted_io_zones.size() / zenfs_parameters_.max_level;
+  int lower_index = interval * (level-1), upper_index = ceil(interval * level);
+  lower_index = std::max(lower_index, 0);
+  upper_index = std::min(upper_index, int(sorted_io_zones.size()));
+
+  IOStatus s;
+  Zone* allocated_zone = nullptr;
+  for (int i = lower_index; i < upper_index; i++) {
+    Zone* z = sorted_io_zones[i];
+    if (!z->Acquire())
+      continue;
+
+    if(z->IsEmpty()) {
+      allocated_zone = z;
+      break;
+    }
+
+    s = z->CheckRelease();
+    if(!s.ok()) return s;
+  }
+
+  if (allocated_zone != nullptr) {
+    *zone_out = allocated_zone;
+    return IOStatus::OK();
+  }
+
+  Zone* upper_alloc = nullptr;
+  int upper_alloc_index = sorted_io_zones.size()-1;
+  
+  for (int i = upper_index; i < sorted_io_zones.size(); i++) {
+    Zone* z = sorted_io_zones[i];
+    if (!z->Acquire())
+      continue;
+
+    if(z->IsEmpty()) {
+      upper_alloc = z;
+      upper_alloc_index = i;
+      break;
+    }
+
+    s = z->CheckRelease();
+    if(!s.ok()) return s;
+  }
+
+  Zone* lower_alloc = nullptr;
+  int lower_alloc_index = 0;
+  
+  for (int i = lower_index-1; i >= 0; i--) {
+    Zone* z = sorted_io_zones[i];
+    if (!z->Acquire())
+      continue;
+
+    if(z->IsEmpty()) {
+      lower_alloc = z;
+      lower_alloc_index = i;
+      break;
+    }
+
+    s = z->CheckRelease();
+    if(!s.ok()) return s;
+  }
+
+  if (lower_alloc == nullptr)
+    *zone_out = upper_alloc;
+  else if (upper_alloc == nullptr)
+    *zone_out = lower_alloc;
+  else if (lower_index - lower_alloc_index < upper_alloc_index - upper_index)
+    *zone_out = upper_alloc;
+  else
+    *zone_out = lower_alloc;
+
+  return IOStatus::OK();
+}
+
 IOStatus ZonedBlockDevice::InvalidateCache(uint64_t pos, uint64_t size) {
   int ret = zbd_be_->InvalidateCache(pos, size);
 
@@ -801,7 +917,7 @@ IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
 }
 
 IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
-                                          IOType io_type, Zone **out_zone) {
+                                          IOType io_type, Zone **out_zone, int level=-1) {
   Zone *allocated_zone = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   int new_zone = 0;
@@ -878,7 +994,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         }
       }
 
-      s = AllocateEmptyZone(&allocated_zone);
+      s = AllocateEmptyZone(&allocated_zone, level);
       if (!s.ok()) {
         PutActiveIOZoneToken();
         PutOpenIOZoneToken();

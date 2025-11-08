@@ -24,6 +24,7 @@
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
 #include "zbd_zenfs.h"
+#include "db/dbformat.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -80,6 +81,12 @@ class ZoneFile {
   std::atomic<int> readers_{0};
 
  public:
+
+  int level_ = -1;
+  InternalKey smallest_;
+  InternalKey largest_;
+  InternalKeyComparator icmp_;
+
   static const int SPARSE_HEADER_SIZE = 8;
 
   explicit ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id_,
@@ -100,6 +107,8 @@ class ZoneFile {
   IOStatus BufferedAppend(char* data, uint32_t size);
   IOStatus SparseAppend(char* data, uint32_t size);
   IOStatus SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime);
+  void SetLevel(int level=-1);
+  void SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp);
   void SetIOType(IOType io_type);
   std::string GetFilename();
   time_t GetFileModificationTime();
@@ -237,6 +246,8 @@ class ZonedWritableFile : public FSWritableFile {
     return zoneFile_->GetBlockSize();
   }
   void SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint) override;
+  void SetLevel(int level=-1) override;
+  void SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) override;
   virtual Env::WriteLifeTimeHint GetWriteLifeTimeHint() override {
     return zoneFile_->GetWriteLifeTimeHint();
   }

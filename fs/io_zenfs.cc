@@ -478,7 +478,7 @@ void ZoneFile::PushExtent() {
 
 IOStatus ZoneFile::AllocateNewZone() {
   Zone* zone;
-  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone);
+  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone, level_);
 
   if (!s.ok()) return s;
   if (!zone) {
@@ -779,6 +779,16 @@ IOStatus ZoneFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime) {
   return IOStatus::OK();
 }
 
+void ZoneFile::SetLevel(int level=-1) {
+  level_ = level;
+}
+
+void ZoneFile::SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) {
+  smallest_ = smallest;
+  largest_ = largest;
+  icmp_ = icmp;
+}
+
 void ZoneFile::ReleaseActiveZone() {
   assert(active_zone_ != nullptr);
   bool ok = active_zone_->Release();
@@ -1045,6 +1055,14 @@ IOStatus ZonedWritableFile::PositionedAppend(const Slice& data, uint64_t offset,
 
 void ZonedWritableFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint) {
   zoneFile_->SetWriteLifeTimeHint(hint);
+}
+
+void ZonedWritableFile::SetLevel(int level=-1) {
+  zoneFile_->SetLevel(level);
+}
+
+void ZonedWritableFile::SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) {
+  zoneFile_->SetKeys(smallest, largest, icmp);
 }
 
 IOStatus ZonedSequentialFile::Read(size_t n, const IOOptions& /*options*/,

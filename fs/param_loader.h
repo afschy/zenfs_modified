@@ -5,6 +5,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 enum EmptyZoneAllocType {
+  kDefault,
   kSequential,
   kRandom,
   kLeastWear,
@@ -13,6 +14,7 @@ enum EmptyZoneAllocType {
 
 struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kSequential;
+  uint8_t max_level = 1;
 
   void LoadParamsFromFile() {
     std::ifstream infile("../params.txt");
@@ -21,6 +23,7 @@ struct ZenfsParamContainer {
     while(infile >> type >> value) {
       static std::unordered_map<std::string, EmptyZoneAllocType>
       empty_zone_allocator_map = {
+        {"kDefault", kDefault},
         {"kSequential", kSequential},
         {"kRandom", kRandom},
         {"kLeastWear", kLeastWear},

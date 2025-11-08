@@ -188,7 +188,7 @@ class ZonedBlockDevice {
   Zone *GetIOZone(uint64_t offset);
 
   IOStatus AllocateIOZone(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
-                          Zone **out_zone);
+                          Zone **out_zone, int level=-1);
   IOStatus AllocateMetaZone(Zone **out_meta_zone);
 
   uint64_t GetFreeSpace();
@@ -244,12 +244,13 @@ class ZonedBlockDevice {
   IOStatus GetBestOpenZoneMatch(Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
-  IOStatus AllocateEmptyZone(Zone **zone_out);
+  IOStatus AllocateEmptyZone(Zone **zone_out, int level=-1);
   
+  IOStatus AllocateEmptyZoneDefault(Zone **zone_out);
   IOStatus AllocateEmptyZoneSequential(Zone **zone_out);
   IOStatus AllocateEmptyZoneRandom(Zone **zone_out);
   IOStatus AllocateEmptyZoneLeastWear(Zone **zone_out);
-  IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out);
+  IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out, int level);
 };
 
 }  // namespace ROCKSDB_NAMESPACE
