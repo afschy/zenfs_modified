@@ -641,6 +641,8 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
 IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level=-1) {
   static std::mutex mtx;
   std::unique_lock<std::mutex> lock(mtx);
+  if(level>0 && level>(int)zenfs_parameters_.max_level)
+    zenfs_parameters_.max_level = level;
 
   switch(zenfs_parameters_.empty_zone_allocator) {
     case kDefault:

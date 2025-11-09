@@ -1,1 +1,6 @@
 empty_zone_allocator kSequential
+upper_level_policy kClusterTogether
+lower_level_policy kSameLevelNearbyKeys
+middle_level_policy kCAZA
+gc_start_level 20
+gc_slope 3

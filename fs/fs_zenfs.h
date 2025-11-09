@@ -25,6 +25,7 @@ namespace fs = std::filesystem;
 #include "snapshot.h"
 #include "version.h"
 #include "zbd_zenfs.h"
+#include "param_loader.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -459,9 +460,9 @@ class ZenFS : public FileSystemWrapper {
       const std::vector<ZoneExtentSnapshot*>& migrate_exts);
 
  private:
-  const uint64_t GC_START_LEVEL =
+  uint64_t GC_START_LEVEL =
       20;                      /* Enable GC when < 20% free space available */
-  const uint64_t GC_SLOPE = 3; /* GC agressiveness */
+  uint64_t GC_SLOPE = 3; /* GC agressiveness */
   void GCWorker();
 };
 // #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)

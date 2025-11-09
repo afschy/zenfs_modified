@@ -270,6 +270,11 @@ ZenFS::~ZenFS() {
 }
 
 void ZenFS::GCWorker() {
+  ZenfsParamContainer container;
+  container.LoadParamsFromFile();
+  GC_START_LEVEL = container.gc_start_level;
+  GC_SLOPE = container.gc_slope;
+
   while (run_gc_worker_) {
     usleep(1000 * 1000 * 10);
 
