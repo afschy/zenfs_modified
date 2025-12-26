@@ -67,6 +67,8 @@ class Zone {
   std::atomic<uint64_t> used_capacity_;
   uint32_t reset_count_;
   uint32_t finish_count_;
+  MappingPolicyType policy_;
+  int level_;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -171,6 +173,9 @@ class ZonedBlockDevice {
 
   std::shared_ptr<ZenFSMetrics> metrics_;
 
+  std::mutex levelwise_files_mtx_;
+  std::vector< std::list< std::shared_ptr<ZoneFile> > > levelwise_file_list_;
+
   void EncodeJsonZone(std::ostream &json_stream,
                       const std::vector<Zone *> zones);
 
@@ -188,7 +193,7 @@ class ZonedBlockDevice {
   Zone *GetIOZone(uint64_t offset);
 
   IOStatus AllocateIOZone(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
-                          Zone **out_zone, int level=-1);
+                          Zone **out_zone, std::shared_ptr<ZoneFile> zonefile);
   IOStatus AllocateMetaZone(Zone **out_meta_zone);
 
   uint64_t GetFreeSpace();
@@ -225,8 +230,8 @@ class ZonedBlockDevice {
 
   IOStatus ReleaseMigrateZone(Zone *zone);
 
-  IOStatus TakeMigrateZone(Zone **out_zone, Env::WriteLifeTimeHint lifetime,
-                           uint32_t min_capacity);
+  IOStatus TakeMigrateZone(Zone **out_zone, std::shared_ptr<ZoneFile> zonefile,
+                           Env::WriteLifeTimeHint lifetime, uint32_t min_capacity);
 
   void AddBytesWritten(uint64_t written) { bytes_written_ += written; };
   void AddGCBytesWritten(uint64_t written) { gc_bytes_written_ += written; };
@@ -235,23 +240,111 @@ class ZonedBlockDevice {
   };
   uint64_t GetTotalBytesWritten() { return bytes_written_.load(); };
 
+  void AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr);
+  void RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr);
+
  private:
   IOStatus GetZoneDeferredStatus();
   bool GetActiveIOZoneTokenIfAvailable();
   void WaitForOpenIOZoneToken(bool prioritized);
   IOStatus ApplyFinishThreshold();
   IOStatus FinishCheapestIOZone();
-  IOStatus GetBestOpenZoneMatch(Env::WriteLifeTimeHint file_lifetime,
+  
+  // Related to choosing the best existing zone for a ZoneFile object
+  IOStatus GetBestOpenZoneMatch(std::shared_ptr<ZoneFile> zonefile,
+                                Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
-  IOStatus AllocateEmptyZone(Zone **zone_out, int level=-1);
+  IOStatus MatchLifetimeBased(std::shared_ptr<ZoneFile> zonefile,
+                              Env::WriteLifeTimeHint file_lifetime,
+                              unsigned int *best_diff_out, Zone **zone_out,
+                              uint32_t min_capacity = 0);
+  IOStatus MatchCAZA(std::shared_ptr<ZoneFile> zonefile,
+                      Env::WriteLifeTimeHint file_lifetime,
+                      unsigned int *best_diff_out, Zone **zone_out,
+                      uint32_t min_capacity = 0);
+  IOStatus MatchSameLevelNearbyKeys(std::shared_ptr<ZoneFile> zonefile,
+                                    Env::WriteLifeTimeHint file_lifetime,
+                                    unsigned int *best_diff_out, Zone **zone_out,
+                                    uint32_t min_capacity = 0);
+  IOStatus MatchArrivalTimeBased(std::shared_ptr<ZoneFile> zonefile,
+                                  Env::WriteLifeTimeHint file_lifetime,
+                                  unsigned int *best_diff_out, Zone **zone_out,
+                                  uint32_t min_capacity = 0);
+  IOStatus MatchTombstoneDensity(std::shared_ptr<ZoneFile> zonefile,
+                                  Env::WriteLifeTimeHint file_lifetime,
+                                  unsigned int *best_diff_out, Zone **zone_out,
+                                  uint32_t min_capacity = 0);
+  IOStatus MatchTombstoneTTL(std::shared_ptr<ZoneFile> zonefile,
+                              Env::WriteLifeTimeHint file_lifetime,
+                              unsigned int *best_diff_out, Zone **zone_out,
+                              uint32_t min_capacity = 0);
+  IOStatus MatchClusterTogether(std::shared_ptr<ZoneFile> zonefile,
+                                Env::WriteLifeTimeHint file_lifetime,
+                                unsigned int *best_diff_out, Zone **zone_out,
+                                uint32_t min_capacity = 0);
+  IOStatus MatchOverlapChildren(std::shared_ptr<ZoneFile> zonefile,
+                                Env::WriteLifeTimeHint file_lifetime,
+                                unsigned int *best_diff_out, Zone **zone_out,
+                                uint32_t min_capacity = 0);
+  IOStatus MatchOverlapGrandchildren(std::shared_ptr<ZoneFile> zonefile,
+                                      Env::WriteLifeTimeHint file_lifetime,
+                                      unsigned int *best_diff_out, Zone **zone_out,
+                                      uint32_t min_capacity = 0);
   
+  // Related to the allocation of a new empty zone when needed
+  IOStatus AllocateEmptyZone(Zone **zone_out, int level=-1);
   IOStatus AllocateEmptyZoneDefault(Zone **zone_out);
   IOStatus AllocateEmptyZoneSequential(Zone **zone_out);
   IOStatus AllocateEmptyZoneRandom(Zone **zone_out);
   IOStatus AllocateEmptyZoneLeastWear(Zone **zone_out);
   IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out, int level);
+
+  // levelwise_files_mtx_ must be held before calling
+  // Returns an array of pointers to files that overlap with zonefile_ptr in a specific level
+  void GetOverlappingFiles(std::vector<std::shared_ptr<ZoneFile>>& ret_container, std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
+  // Returns the number of files that overlap with zonefile_ptr in target_level
+  int GetOverlapCount(std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
+  // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
+  void OverlapRankHelper(std::vector<std::shared_ptr<ZoneFile>>& container, int own_level, int target_level);
+  // Returns true if the given files overlap
+  bool IsOverlapping(std::shared_ptr<ZoneFile> a, std::shared_ptr<ZoneFile> b, InternalKeyComparator& icmp);
+  // Returns true if the ratio of tombstones in the given file is higher than the threshold
+  bool IsHighTombstone(std::shared_ptr<ZoneFile> zonefile_ptr);
+
+  // result (output) contains the amount of data each zone holds from the given file(s)
+  void GetPerZoneContribution(std::vector<std::shared_ptr<ZoneFile>>& files, std::map<uint64_t, uint64_t>& result, double factor=1.0);
+  void GetPerZoneContribution(std::shared_ptr<ZoneFile> zonefile, std::map<uint64_t, uint64_t>& result, double factor=1.0);
+
+  MappingPolicyType GetPolicy(int level) {
+    if(level < 0) return kLifetimeBased;
+    if(level <= zenfs_parameters_.min_boundary) return zenfs_parameters_.upper_level_policy;
+    if(level >= zenfs_parameters_.max_boundary) return zenfs_parameters_.lower_level_policy;
+    return zenfs_parameters_.middle_level_policy;
+  }
 };
+
+#define LIFETIME_DIFF_NOT_GOOD (100)
+#define LIFETIME_DIFF_COULD_BE_WORSE (50)
+
+unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
+                             Env::WriteLifeTimeHint file_lifetime) {
+  assert(file_lifetime <= Env::WLTH_EXTREME);
+
+  if ((file_lifetime == Env::WLTH_NOT_SET) ||
+      (file_lifetime == Env::WLTH_NONE)) {
+    if (file_lifetime == zone_lifetime) {
+      return 0;
+    } else {
+      return LIFETIME_DIFF_NOT_GOOD;
+    }
+  }
+
+  if (zone_lifetime > file_lifetime) return zone_lifetime - file_lifetime;
+  if (zone_lifetime == file_lifetime) return LIFETIME_DIFF_COULD_BE_WORSE;
+
+  return LIFETIME_DIFF_NOT_GOOD;
+}
 
 }  // namespace ROCKSDB_NAMESPACE
 

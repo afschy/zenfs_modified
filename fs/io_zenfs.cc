@@ -29,8 +29,8 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-ZoneExtent::ZoneExtent(uint64_t start, uint64_t length, Zone* zone)
-    : start_(start), length_(length), zone_(zone) {}
+ZoneExtent::ZoneExtent(uint64_t start, uint64_t length, Zone* zone, int level)
+    : start_(start), length_(length), zone_(zone), level_(level) {}
 
 Status ZoneExtent::DecodeFrom(Slice* input) {
   if (input->size() != (sizeof(start_) + sizeof(length_)))
@@ -162,7 +162,7 @@ Status ZoneFile::DecodeFrom(Slice* input) {
         lifetime_ = (Env::WriteLifeTimeHint)lt;
         break;
       case kExtent:
-        extent = new ZoneExtent(0, 0, nullptr);
+        extent = new ZoneExtent(0, 0, nullptr, -1);
         GetLengthPrefixedSlice(input, &slice);
         s = extent->DecodeFrom(&slice);
         if (!s.ok()) {
@@ -225,7 +225,7 @@ Status ZoneFile::MergeUpdate(std::shared_ptr<ZoneFile> update, bool replace) {
     ZoneExtent* extent = update_extents[i];
     Zone* zone = extent->zone_;
     zone->used_capacity_ += extent->length_;
-    extents_.push_back(new ZoneExtent(extent->start_, extent->length_, zone));
+    extents_.push_back(new ZoneExtent(extent->start_, extent->length_, zone, -1));
   }
   extent_start_ = update->GetExtentStart();
   is_sparse_ = update->IsSparse();
@@ -309,6 +309,8 @@ void ZoneFile::ReleaseWRLock() {
 bool ZoneFile::IsOpenForWR() { return open_for_wr_; }
 
 IOStatus ZoneFile::CloseWR() {
+  CreateOrUpdateRecord();
+
   IOStatus s;
   /* Mark up the file as being closed */
   extent_start_ = NO_EXTENT;
@@ -469,7 +471,7 @@ void ZoneFile::PushExtent() {
   if (length == 0) return;
 
   assert(length <= (active_zone_->wp_ - extent_start_));
-  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_));
+  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_, level_));
 
   active_zone_->used_capacity_ += length;
   extent_start_ = active_zone_->wp_;
@@ -478,7 +480,7 @@ void ZoneFile::PushExtent() {
 
 IOStatus ZoneFile::AllocateNewZone() {
   Zone* zone;
-  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone, level_);
+  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone, std::shared_ptr<ZoneFile>(this));
 
   if (!s.ok()) return s;
   if (!zone) {
@@ -524,7 +526,7 @@ IOStatus ZoneFile::BufferedAppend(char* buffer, uint32_t data_size) {
     if (!s.ok()) return s;
 
     extents_.push_back(
-        new ZoneExtent(extent_start_, extent_length, active_zone_));
+        new ZoneExtent(extent_start_, extent_length, active_zone_, level_));
 
     extent_start_ = active_zone_->wp_;
     active_zone_->used_capacity_ += extent_length;
@@ -582,7 +584,7 @@ IOStatus ZoneFile::SparseAppend(char* sparse_buffer, uint32_t data_size) {
 
     extents_.push_back(
         new ZoneExtent(extent_start_ + ZoneFile::SPARSE_HEADER_SIZE,
-                       extent_length, active_zone_));
+                       extent_length, active_zone_, level_));
 
     extent_start_ = active_zone_->wp_;
     active_zone_->used_capacity_ += extent_length;
@@ -677,7 +679,7 @@ IOStatus ZoneFile::RecoverSparseExtents(uint64_t start, uint64_t end,
 
     zone->used_capacity_ += extent_length;
     extents_.push_back(new ZoneExtent(next_extent_start + SPARSE_HEADER_SIZE,
-                                      extent_length, zone));
+                                      extent_length, zone, level_));
 
     uint64_t extent_blocks = (extent_length + SPARSE_HEADER_SIZE) / block_sz;
     if ((extent_length + SPARSE_HEADER_SIZE) % block_sz) {
@@ -725,7 +727,7 @@ IOStatus ZoneFile::Recover() {
     /* For non-sparse files, the data is contigous and we can recover directly
        any missing data using the WP */
     zone->used_capacity_ += to_recover;
-    extents_.push_back(new ZoneExtent(extent_start_, to_recover, zone));
+    extents_.push_back(new ZoneExtent(extent_start_, to_recover, zone, level_));
   }
 
   /* Mark up the file as having no missing extents */
@@ -781,12 +783,40 @@ IOStatus ZoneFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime) {
 
 void ZoneFile::SetLevel(int level=-1) {
   level_ = level;
+  for(const auto& ext: extents_)
+    ext->level_ = level;
 }
 
-void ZoneFile::SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) {
-  smallest_ = smallest;
-  largest_ = largest;
-  icmp_ = icmp;
+void ZoneFile::UpdateInternalKeys(const Slice& key) {
+  if (smallest_.size() == 0) {
+    smallest_.DecodeFrom(key);
+  }
+  largest_.DecodeFrom(key);
+}
+
+void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp) {
+  if (smallest_.size() == 0 || icmp.Compare(start, smallest_) < 0) {
+    smallest_ = start;
+  }
+  if (largest_.size() == 0 || icmp.Compare(largest_, end) < 0) {
+    largest_ = end;
+  }
+}
+
+void ZoneFile::UpdateMetadata(const TableProperties& table_properties) {
+  num_entries_ = table_properties.num_entries;
+  num_deletions_ = table_properties.num_deletions;
+  num_range_deletions_ = table_properties.num_range_deletions;
+}
+
+void ZoneFile::UpdateMetadata(const FileMetaData* meta) {
+  num_entries_ = meta->num_entries;
+  num_deletions_ = meta->num_deletions;
+  num_range_deletions_ = meta->num_range_deletions;
+}
+
+void ZoneFile::SetInternalComparator(const InternalKeyComparator& icmp) {
+  this->icmp_ = icmp;
 }
 
 void ZoneFile::ReleaseActiveZone() {
@@ -803,6 +833,15 @@ void ZoneFile::SetActiveZone(Zone* zone) {
   active_zone_ = zone;
 }
 
+void ZoneFile::CreateOrUpdateRecord() {
+  if(level_ < 0)
+    return;
+  if(is_recorded_)
+    zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+  zbd_->AddZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+  is_recorded_ = true;
+}
+
 ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
                                      std::shared_ptr<ZoneFile> zoneFile) {
   assert(zoneFile->IsOpenForWR());
@@ -815,12 +854,22 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
   sparse_buffer = nullptr;
   buffer = nullptr;
 
+  buffer_size_megabytes = zoneFile->GetZbd()->zenfs_parameters_.buffer_size_megabytes;
+  if(max_buffer_count == INT32_MAX)
+    zoneFile->GetZbd()->zenfs_parameters_.buffer_size_megabytes;
+
   if (buffered) {
+    // if maximum buffer capacity is reached, wait for a buffer to be de-allocated
+    std::unique_lock lk(buffer_count_mtx_);
+    buffer_count_condvar_.wait(lk, [this]{ return curr_buffer_count < max_buffer_count; });
+    curr_buffer_count++;
+    lk.unlock();
+
     if (zoneFile->IsSparse()) {
       size_t sparse_buffer_sz;
 
       sparse_buffer_sz =
-          1024 * 1024 + block_sz; /* one extra block size for padding */
+          buffer_size_megabytes * 1024 * 1024 + block_sz; /* one extra block size for padding */
       int ret = posix_memalign((void**)&sparse_buffer, sysconf(_SC_PAGESIZE),
                                sparse_buffer_sz);
 
@@ -831,7 +880,7 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
       buffer_sz = sparse_buffer_sz - ZoneFile::SPARSE_HEADER_SIZE - block_sz;
       buffer = sparse_buffer + ZoneFile::SPARSE_HEADER_SIZE;
     } else {
-      buffer_sz = 1024 * 1024;
+      buffer_sz = buffer_size_megabytes * 1024 * 1024;
       int ret =
           posix_memalign((void**)&buffer, sysconf(_SC_PAGESIZE), buffer_sz);
 
@@ -851,6 +900,13 @@ ZonedWritableFile::~ZonedWritableFile() {
     } else {
       free(buffer);
     }
+
+    std::unique_lock lk(buffer_count_mtx_);
+    lk.lock();
+    if(curr_buffer_count > 0)
+      curr_buffer_count--;
+    lk.unlock();
+    buffer_count_condvar_.notify_all();
   }
 
   if (!s.ok()) {
@@ -1061,8 +1117,24 @@ void ZonedWritableFile::SetLevel(int level=-1) {
   zoneFile_->SetLevel(level);
 }
 
-void ZonedWritableFile::SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) {
-  zoneFile_->SetKeys(smallest, largest, icmp);
+void ZonedWritableFile::UpdateInternalKeys(const Slice& key) {
+  zoneFile_->UpdateInternalKeys(key);
+}
+
+void ZonedWritableFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp) {
+  zoneFile_->UpdateInternalKeysRange(start, end, icmp);
+}
+
+void ZonedWritableFile::UpdateMetadata(const TableProperties& table_properties) {
+  zoneFile_->UpdateMetadata(table_properties);
+}
+
+void ZonedWritableFile::UpdateMetadata(const FileMetaData* meta) {
+  zoneFile_->UpdateMetadata(meta);
+}
+
+void ZonedWritableFile::SetInternalComparator(const InternalKeyComparator& icmp) {
+  zoneFile_->SetInternalComparator(icmp);
 }
 
 IOStatus ZonedSequentialFile::Read(size_t n, const IOOptions& /*options*/,

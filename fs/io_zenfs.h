@@ -20,11 +20,13 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <semaphore>
 
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
 #include "zbd_zenfs.h"
 #include "db/dbformat.h"
+#include "db/version_edit.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -33,8 +35,9 @@ class ZoneExtent {
   uint64_t start_;
   uint64_t length_;
   Zone* zone_;
+  int level_;
 
-  explicit ZoneExtent(uint64_t start, uint64_t length, Zone* zone);
+  explicit ZoneExtent(uint64_t start, uint64_t length, Zone* zone, int level);
   Status DecodeFrom(Slice* input);
   void EncodeTo(std::string* output);
   void EncodeJson(std::ostream& json_stream);
@@ -87,6 +90,15 @@ class ZoneFile {
   InternalKey largest_;
   InternalKeyComparator icmp_;
 
+  uint64_t num_entries_ = 0;
+  uint64_t num_deletions_ = 0;
+  uint64_t num_range_deletions_ = 0;
+  
+  bool has_keys_ = false;
+  bool is_recorded_ = false;
+
+  int rank_ = 100000;
+
   static const int SPARSE_HEADER_SIZE = 8;
 
   explicit ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id_,
@@ -107,8 +119,14 @@ class ZoneFile {
   IOStatus BufferedAppend(char* data, uint32_t size);
   IOStatus SparseAppend(char* data, uint32_t size);
   IOStatus SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime);
+  
   void SetLevel(int level=-1);
-  void SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp);
+  void UpdateInternalKeys(const Slice& key);
+  void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp);
+  virtual void UpdateMetadata(const TableProperties& table_properties);
+  void UpdateMetadata(const FileMetaData* meta);
+  void SetInternalComparator(const InternalKeyComparator& icmp);
+  
   void SetIOType(IOType io_type);
   std::string GetFilename();
   time_t GetFileModificationTime();
@@ -165,12 +183,16 @@ class ZoneFile {
   void ReleaseActiveZone();
   void SetActiveZone(Zone* zone);
   IOStatus CloseActiveZone();
+  void CreateOrUpdateRecord();
 
  public:
   std::shared_ptr<ZenFSMetrics> GetZBDMetrics() { return zbd_->GetMetrics(); };
   IOType GetIOType() const { return io_type_; };
   bool IsDeleted() const { return is_deleted_; };
-  void SetDeleted() { is_deleted_ = true; };
+  void SetDeleted() {
+    is_deleted_ = true;
+    zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+  };
   IOStatus RecoverSparseExtents(uint64_t start, uint64_t end, Zone* zone);
 
  public:
@@ -247,7 +269,11 @@ class ZonedWritableFile : public FSWritableFile {
   }
   void SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint) override;
   void SetLevel(int level=-1) override;
-  void SetKeys(InternalKey smallest, InternalKey largest, InternalKeyComparator icmp) override;
+  virtual void UpdateInternalKeys(const Slice& key) override;
+  virtual void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp);
+  virtual void UpdateMetadata(const TableProperties& table_properties);
+  virtual void UpdateMetadata(const FileMetaData* meta) override;
+  virtual void SetInternalComparator(const InternalKeyComparator& icmp) override;
   virtual Env::WriteLifeTimeHint GetWriteLifeTimeHint() override {
     return zoneFile_->GetWriteLifeTimeHint();
   }
@@ -261,6 +287,7 @@ class ZonedWritableFile : public FSWritableFile {
   bool buffered;
   char* sparse_buffer;
   char* buffer;
+  uint32_t buffer_size_megabytes;
   size_t buffer_sz;
   uint32_t block_sz;
   uint32_t buffer_pos;
@@ -272,6 +299,12 @@ class ZonedWritableFile : public FSWritableFile {
   MetadataWriter* metadata_writer_;
 
   std::mutex buffer_mtx_;
+
+  static inline uint32_t max_buffer_count = INT32_MAX;
+  static inline uint32_t curr_buffer_count = 0;
+
+  static inline std::mutex buffer_count_mtx_;
+  static inline std::condition_variable buffer_count_condvar_;
 };
 
 class ZonedSequentialFile : public FSSequentialFile {

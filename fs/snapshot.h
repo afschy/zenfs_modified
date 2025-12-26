@@ -69,6 +69,7 @@ class ZoneExtentSnapshot {
   uint64_t start;
   uint64_t length;
   uint64_t zone_start;
+  int level;
   std::string filename;
 
  public:
@@ -76,6 +77,7 @@ class ZoneExtentSnapshot {
       : start(extent.start_),
         length(extent.length_),
         zone_start(extent.zone_->start_),
+        level(extent.level_),
         filename(fname) {}
 };
 
@@ -83,11 +85,12 @@ class ZoneFileSnapshot {
  public:
   uint64_t file_id;
   std::string filename;
+  int level;
   std::vector<ZoneExtentSnapshot> extents;
 
  public:
   ZoneFileSnapshot(ZoneFile& file)
-      : file_id(file.GetID()), filename(file.GetFilename()) {
+      : file_id(file.GetID()), filename(file.GetFilename()), level(file.level_) {
     for (const auto* extent : file.GetExtents()) {
       extents.emplace_back(*extent, filename);
     }

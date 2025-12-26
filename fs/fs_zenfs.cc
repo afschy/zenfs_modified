@@ -274,9 +274,10 @@ void ZenFS::GCWorker() {
   container.LoadParamsFromFile();
   GC_START_LEVEL = container.gc_start_level;
   GC_SLOPE = container.gc_slope;
+  GC_PAUSE_SECONDS = container.gc_pause_seconds;
 
   while (run_gc_worker_) {
-    usleep(1000 * 1000 * 10);
+    usleep(1000 * 1000 * GC_PAUSE_SECONDS);
 
     uint64_t non_free = zbd_->GetUsedSpace() + zbd_->GetReclaimableSpace();
     uint64_t free = zbd_->GetFreeSpace();
@@ -316,6 +317,65 @@ void ZenFS::GCWorker() {
     if (migrate_exts.size() > 0) {
       IOStatus s;
       Info(logger_, "Garbage collecting %d extents \n",
+           (int)migrate_exts.size());
+      s = MigrateExtents(migrate_exts);
+      if (!s.ok()) {
+        Error(logger_, "Garbage collection failed");
+      }
+    }
+
+    if(!container.cold_migration) continue;
+    // <zone_start, level_sum>, needed to calculate average level of a file
+    std::unordered_map<uint64_t, double> level_map;
+    // <zone_start, total_size>, needed to calculate average level of a file
+    std::unordered_map<uint64_t, uint64_t> size_map;
+
+    for (auto& ext : snapshot.extents_) {
+      if(ext.level < 0 || ext.length <= 0) continue;
+      if(level_map.find(ext.zone_start) == level_map.end()) {
+        level_map[ext.zone_start] = 0;
+        size_map[ext.zone_start] = 0;
+      }
+      level_map[ext.zone_start] += ext.level * ext.length;
+      size_map[ext.zone_start] += ext.length;
+    }
+    for (const auto& it : level_map)
+      level_map[it.first] = level_map[it.first] / size_map[it.first];
+
+    std::vector<ZoneSnapshot> sorted_snapshots = snapshot.zones_;
+    std::sort(sorted_snapshots.begin(), sorted_snapshots.end(), [](const ZoneSnapshot& a, const ZoneSnapshot& b) {
+      return a.reset_count < b.reset_count;
+    });
+    double interval = 1.00 * sorted_snapshots.size() / zbd_->zenfs_parameters_.max_level;
+
+    int max_diff = 0;
+    int zone_start_max_diff = -1;
+
+    for(int i=0; i<sorted_snapshots.size(); i++) {
+      if(size_map.find(sorted_snapshots[i].start) == size_map.end())
+        continue;
+      int ideal_bin = 1.00 * i / interval;
+      int real_bin = level_map[sorted_snapshots[i].start];
+      int diff = real_bin - ideal_bin;
+      
+      if(diff <= max_diff) continue;
+
+      max_diff = diff;
+      zone_start_max_diff = sorted_snapshots[i].start;
+    }
+
+    if(zone_start_max_diff < 3) continue;
+
+    migrate_exts.clear();
+    for (auto& ext : snapshot.extents_) {
+      if (ext.zone_start == zone_start_max_diff) {
+        migrate_exts.push_back(&ext);
+      }
+    }
+
+    if (migrate_exts.size() > 0) {
+      IOStatus s;
+      Info(logger_, "Migrating %d extents of cold files\n",
            (int)migrate_exts.size());
       s = MigrateExtents(migrate_exts);
       if (!s.ok()) {
@@ -858,6 +918,8 @@ IOStatus ZenFS::OpenWritableFile(const std::string& filename,
     if (ends_with(fname, ".log")) {
       zoneFile->SetIOType(IOType::kWAL);
       zoneFile->SetSparse(!file_opts.use_direct_writes);
+    } else if(ends_with(fname, ".sst")) {
+      zoneFile->SetIOType(IOType::kData);
     } else {
       zoneFile->SetIOType(IOType::kUnknown);
     }
@@ -1794,7 +1856,7 @@ IOStatus ZenFS::MigrateFileExtents(
   std::vector<ZoneExtent*> extents = zfile->GetExtents();
   for (const auto* ext : extents) {
     new_extent_list.push_back(
-        new ZoneExtent(ext->start_, ext->length_, ext->zone_));
+        new ZoneExtent(ext->start_, ext->length_, ext->zone_, zfile->level_));
   }
 
   // Modify the new extent list
@@ -1814,7 +1876,7 @@ IOStatus ZenFS::MigrateFileExtents(
     Zone* target_zone = nullptr;
 
     // Allocate a new migration zone.
-    s = zbd_->TakeMigrateZone(&target_zone, zfile->GetWriteLifeTimeHint(),
+    s = zbd_->TakeMigrateZone(&target_zone, zfile, zfile->GetWriteLifeTimeHint(),
                               ext->length_);
     if (!s.ok()) {
       continue;

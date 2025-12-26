@@ -339,6 +339,13 @@ class ZenFS : public FileSystemWrapper {
   IOStatus RenameFile(const std::string& f, const std::string& t,
                       const IOOptions& options, IODebugContext* dbg) override;
 
+  virtual void MoveFileToNewLevel(const std::string& filename, int new_level) override {
+    std::shared_ptr<ZoneFile> zonefile = GetFile(filename);
+    zbd_->RemoveZoneFileRecord(zonefile);
+    zonefile->SetLevel(new_level);
+    zbd_->AddZoneFileRecord(zonefile);
+  }
+
   IOStatus GetFreeSpace(const std::string& /*path*/,
                         const IOOptions& /*options*/, uint64_t* diskfree,
                         IODebugContext* /*dbg*/) override {
@@ -463,6 +470,7 @@ class ZenFS : public FileSystemWrapper {
   uint64_t GC_START_LEVEL =
       20;                      /* Enable GC when < 20% free space available */
   uint64_t GC_SLOPE = 3; /* GC agressiveness */
+  uint64_t GC_PAUSE_SECONDS = 10;
   void GCWorker();
 };
 // #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)

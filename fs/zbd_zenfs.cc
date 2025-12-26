@@ -63,6 +63,8 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   capacity_ = 0;
   reset_count_ = 0;
   finish_count_ = 0;
+  policy_ = kLifetimeBased;
+  level_ = -1;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
 }
@@ -399,28 +401,6 @@ ZonedBlockDevice::~ZonedBlockDevice() {
   }
 }
 
-#define LIFETIME_DIFF_NOT_GOOD (100)
-#define LIFETIME_DIFF_COULD_BE_WORSE (50)
-
-unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
-                             Env::WriteLifeTimeHint file_lifetime) {
-  assert(file_lifetime <= Env::WLTH_EXTREME);
-
-  if ((file_lifetime == Env::WLTH_NOT_SET) ||
-      (file_lifetime == Env::WLTH_NONE)) {
-    if (file_lifetime == zone_lifetime) {
-      return 0;
-    } else {
-      return LIFETIME_DIFF_NOT_GOOD;
-    }
-  }
-
-  if (zone_lifetime > file_lifetime) return zone_lifetime - file_lifetime;
-  if (zone_lifetime == file_lifetime) return LIFETIME_DIFF_COULD_BE_WORSE;
-
-  return LIFETIME_DIFF_NOT_GOOD;
-}
-
 IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
   assert(out_meta_zone);
   *out_meta_zone = nullptr;
@@ -599,43 +579,66 @@ IOStatus ZonedBlockDevice::FinishCheapestIOZone() {
 }
 
 IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
-    Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out,
+    std::shared_ptr<ZoneFile> zonefile,
+    Env::WriteLifeTimeHint file_lifetime,
+    unsigned int *best_diff_out,
     Zone **zone_out, uint32_t min_capacity) {
-  unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
-  Zone *allocated_zone = nullptr;
-  IOStatus s;
+  
+  //TODO: Reconsider when the keys are given to the ZoneFile, maybe implement buffering
+  if(zonefile->level_ < 0 || !zonefile->has_keys_ || zonefile->GetIOType() != IOType::kData)
+    return MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out);
+  
+  typedef IOStatus (ZonedBlockDevice::*MatchFunctionType)(std::shared_ptr<ZoneFile> zonefile, Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out, Zone **zone_out, uint32_t min_capacity);
+  static std::unordered_map<MappingPolicyType, MatchFunctionType> function_map;
 
-  for (const auto z : io_zones) {
-    if (z->Acquire()) {
-      if ((z->used_capacity_ > 0) && !z->IsFull() &&
-          z->capacity_ >= min_capacity) {
-        unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
-        if (diff <= best_diff) {
-          if (allocated_zone != nullptr) {
-            s = allocated_zone->CheckRelease();
-            if (!s.ok()) {
-              IOStatus s_ = z->CheckRelease();
-              if (!s_.ok()) return s_;
-              return s;
-            }
-          }
-          allocated_zone = z;
-          best_diff = diff;
-        } else {
-          s = z->CheckRelease();
-          if (!s.ok()) return s;
-        }
-      } else {
-        s = z->CheckRelease();
-        if (!s.ok()) return s;
-      }
-    }
+  function_map = {
+    {kLifetimeBased, &MatchLifetimeBased},
+    {kCAZA, &MatchCAZA},
+    {kSameLevelNearbyKeys, &MatchSameLevelNearbyKeys},
+    {kArrivalTimeBased, &MatchArrivalTimeBased},
+    {kTombstoneDensity, &MatchTombstoneDensity},
+    {kTombstoneTTL, &MatchTombstoneTTL},
+    {kClusterTogether, &MatchClusterTogether},
+    {kOverlapChildren, &MatchOverlapChildren},
+    {kOverlapGrandchildren, &MatchOverlapGrandchildren},
+  };
+
+  MappingPolicyType primary_policy;
+  MappingPolicyType fallback_policy;
+  if(zonefile->level_ <= zenfs_parameters_.min_boundary) {
+    primary_policy = zenfs_parameters_.upper_level_policy;
+    fallback_policy = zenfs_parameters_.upper_level_policy_fallback;
+  }
+  else if(zonefile->level_ >= zenfs_parameters_.max_boundary) {
+    primary_policy = zenfs_parameters_.lower_level_policy;
+    fallback_policy = zenfs_parameters_.lower_level_policy_fallback;
+  }
+  else {
+    primary_policy = zenfs_parameters_.middle_level_policy;
+    fallback_policy = zenfs_parameters_.lower_level_policy_fallback;
   }
 
-  *best_diff_out = best_diff;
-  *zone_out = allocated_zone;
+  MatchFunctionType primary_policy_function = function_map[primary_policy];
+  MatchFunctionType fallback_policy_function = function_map[fallback_policy];
 
-  return IOStatus::OK();
+  IOStatus s;
+  Zone* old_zone = *zone_out;
+  
+  s = (this->*primary_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  if(*zone_out != old_zone)
+    return s;
+
+  s = (this->*fallback_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  if(primary_policy == kArrivalTimeBased || primary_policy == kClusterTogether)
+    *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  if(primary_policy == kTombstoneDensity && IsHighTombstone(zonefile))
+    *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  if(*zone_out != old_zone)
+    return s;
+
+  s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  return s;
 }
 
 IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level=-1) {
@@ -658,198 +661,6 @@ IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level=-1) {
     default:
       return AllocateEmptyZoneSequential(zone_out);
   }
-}
-
-IOStatus ZonedBlockDevice::AllocateEmptyZoneDefault(Zone **zone_out) {
-  IOStatus s;
-  Zone *allocated_zone = nullptr;
-  for (const auto z : io_zones) {
-    if (!z->Acquire())
-      continue;
-
-    if (z->IsEmpty()) {
-      allocated_zone = z;
-      break;
-    } 
-    else {
-      s = z->CheckRelease();
-      if (!s.ok()) return s;
-    }
-  }
-  *zone_out = allocated_zone;
-  return IOStatus::OK();
-}
-
-IOStatus ZonedBlockDevice::AllocateEmptyZoneSequential(Zone **zone_out) {
-  static int zone_pos = 0;
-  int curr_traversed = 0;
-  
-  IOStatus s;
-  Zone *allocated_zone = nullptr;
-  while (curr_traversed < io_zones.size()) {
-    Zone* z = io_zones[zone_pos];
-    curr_traversed++;
-    zone_pos++;
-    if(zone_pos >= io_zones.size())
-      zone_pos = 0;
-
-    if (!z->Acquire())
-      continue;
-
-    if (z->IsEmpty()) {
-      allocated_zone = z;
-      break;
-    } 
-    else {
-      s = z->CheckRelease();
-      if (!s.ok()) return s;
-    }
-  }
-  *zone_out = allocated_zone;
-  return IOStatus::OK();
-}
-
-IOStatus ZonedBlockDevice::AllocateEmptyZoneLeastWear(Zone **zone_out) {
-  IOStatus s;
-  Zone *allocated_zone = nullptr;
-  
-  for (const auto z : io_zones) {
-    if (!z->Acquire())
-      continue;
-
-    if(!z->IsEmpty()) {
-      s = z->CheckRelease();
-      if (!s.ok()) return s;
-      continue;
-    }
-
-    // Chose this zone if no zone has been chosen yet
-    if (allocated_zone == nullptr) {
-      allocated_zone = z;
-      continue;
-    }
-
-    // Skip this zone if it's not better than the already chosen zone
-    if(allocated_zone->reset_count_ > z->reset_count_) {
-      s = z->CheckRelease();
-      if (!s.ok()) return s;
-      continue;
-    }
-
-    // A zone with a smaller reset count is found
-    s = allocated_zone->CheckRelease();
-    if (!s.ok()) return s;
-    allocated_zone = z;
-  }
-
-  *zone_out = allocated_zone;
-  return IOStatus::OK();
-}
-
-IOStatus ZonedBlockDevice::AllocateEmptyZoneRandom(Zone **zone_out) {
-  std::vector<Zone*> shuffled_io_zones(io_zones);
-  static auto rng = std::default_random_engine {};
-  std::shuffle(std::begin(shuffled_io_zones), std::end(shuffled_io_zones), rng);
-
-  IOStatus s;
-  Zone *allocated_zone = nullptr;
-  for (const auto z : shuffled_io_zones) {
-    if (!z->Acquire())
-      continue;
-
-    if (z->IsEmpty()) {
-      allocated_zone = z;
-      break;
-    } 
-    else {
-      s = z->CheckRelease();
-      if (!s.ok()) return s;
-    }
-  }
-  *zone_out = allocated_zone;
-  return IOStatus::OK();
-}
-
-IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int level) {
-  if (level <= 0)
-    return AllocateEmptyZoneLeastWear(zone_out);
-
-  std::vector<Zone *> sorted_io_zones(io_zones);
-  std::sort(sorted_io_zones.begin(), sorted_io_zones.end(), [](const Zone* &a, const Zone* &b)
-            { return a->reset_count_ < b->reset_count_; });
-
-  double interval = 1.00 * sorted_io_zones.size() / zenfs_parameters_.max_level;
-  int lower_index = interval * (level-1), upper_index = ceil(interval * level);
-  lower_index = std::max(lower_index, 0);
-  upper_index = std::min(upper_index, int(sorted_io_zones.size()));
-
-  IOStatus s;
-  Zone* allocated_zone = nullptr;
-  for (int i = lower_index; i < upper_index; i++) {
-    Zone* z = sorted_io_zones[i];
-    if (!z->Acquire())
-      continue;
-
-    if(z->IsEmpty()) {
-      allocated_zone = z;
-      break;
-    }
-
-    s = z->CheckRelease();
-    if(!s.ok()) return s;
-  }
-
-  if (allocated_zone != nullptr) {
-    *zone_out = allocated_zone;
-    return IOStatus::OK();
-  }
-
-  Zone* upper_alloc = nullptr;
-  int upper_alloc_index = sorted_io_zones.size()-1;
-  
-  for (int i = upper_index; i < sorted_io_zones.size(); i++) {
-    Zone* z = sorted_io_zones[i];
-    if (!z->Acquire())
-      continue;
-
-    if(z->IsEmpty()) {
-      upper_alloc = z;
-      upper_alloc_index = i;
-      break;
-    }
-
-    s = z->CheckRelease();
-    if(!s.ok()) return s;
-  }
-
-  Zone* lower_alloc = nullptr;
-  int lower_alloc_index = 0;
-  
-  for (int i = lower_index-1; i >= 0; i--) {
-    Zone* z = sorted_io_zones[i];
-    if (!z->Acquire())
-      continue;
-
-    if(z->IsEmpty()) {
-      lower_alloc = z;
-      lower_alloc_index = i;
-      break;
-    }
-
-    s = z->CheckRelease();
-    if(!s.ok()) return s;
-  }
-
-  if (lower_alloc == nullptr)
-    *zone_out = upper_alloc;
-  else if (upper_alloc == nullptr)
-    *zone_out = lower_alloc;
-  else if (lower_index - lower_alloc_index < upper_alloc_index - upper_index)
-    *zone_out = upper_alloc;
-  else
-    *zone_out = lower_alloc;
-
-  return IOStatus::OK();
 }
 
 IOStatus ZonedBlockDevice::InvalidateCache(uint64_t pos, uint64_t size) {
@@ -899,6 +710,7 @@ IOStatus ZonedBlockDevice::ReleaseMigrateZone(Zone *zone) {
 }
 
 IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
+                                           std::shared_ptr<ZoneFile> zonefile,
                                            Env::WriteLifeTimeHint file_lifetime,
                                            uint32_t min_capacity) {
   std::unique_lock<std::mutex> lock(migrate_zone_mtx_);
@@ -908,7 +720,7 @@ IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
 
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   auto s =
-      GetBestOpenZoneMatch(file_lifetime, &best_diff, out_zone, min_capacity);
+      GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, out_zone, min_capacity);
   if (s.ok() && (*out_zone) != nullptr) {
     Info(logger_, "TakeMigrateZone: %lu", (*out_zone)->start_);
   } else {
@@ -919,7 +731,13 @@ IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
 }
 
 IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
-                                          IOType io_type, Zone **out_zone, int level=-1) {
+                                          IOType io_type,
+                                          Zone **out_zone,
+                                          std::shared_ptr<ZoneFile> zonefile) {
+
+  if(zonefile->level_ > zenfs_parameters_.max_level)
+    zenfs_parameters_.max_level = zonefile->level_;
+
   Zone *allocated_zone = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   int new_zone = 0;
@@ -954,7 +772,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
   WaitForOpenIOZoneToken(io_type == IOType::kWAL);
 
   /* Try to fill an already open zone(with the best life time diff) */
-  s = GetBestOpenZoneMatch(file_lifetime, &best_diff, &allocated_zone);
+  s = GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, &allocated_zone);
   if (!s.ok()) {
     PutOpenIOZoneToken();
     return s;
@@ -996,7 +814,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         }
       }
 
-      s = AllocateEmptyZone(&allocated_zone, level);
+      s = AllocateEmptyZone(&allocated_zone, zonefile->level_);
       if (!s.ok()) {
         PutActiveIOZoneToken();
         PutOpenIOZoneToken();
@@ -1006,6 +824,8 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
       if (allocated_zone != nullptr) {
         assert(allocated_zone->IsBusy());
         allocated_zone->lifetime_ = file_lifetime;
+        allocated_zone->policy_ = GetPolicy(zonefile->level_);
+        allocated_zone->level_ = zonefile->level_;
         new_zone = true;
       } else {
         PutActiveIOZoneToken();
