@@ -28,6 +28,7 @@ struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kSequential;
   
   uint8_t max_level = 1;
+  std::mutex lock_max_level;
   uint8_t min_boundary = 1; // levels <= this will follow a special policy
   uint8_t max_boundary = 4; // levels >= this will follow a special policy
 

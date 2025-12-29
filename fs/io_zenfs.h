@@ -30,7 +30,7 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-class ZoneExtent {
+class ZoneExtent {  // part of a file in a specific zone
  public:
   uint64_t start_;
   uint64_t length_;
@@ -58,15 +58,17 @@ class ZoneFile {
 
   ZonedBlockDevice* zbd_;
 
-  std::vector<ZoneExtent*> extents_;
+  std::vector<ZoneExtent*> extents_;  // parts of a file can be spread across multiple zones
   std::vector<std::string> linkfiles_;
 
+  // the zone the file will be put, as long as there is enough space
+  // nullptr by default, allocated using AllocateIOZone when needed
   Zone* active_zone_;
   uint64_t extent_start_ = NO_EXTENT;
   uint64_t extent_filepos_ = 0;
 
   Env::WriteLifeTimeHint lifetime_;
-  IOType io_type_; /* Only used when writing */
+  IOType io_type_; /* Only used when writing, for SST files value should be kData */
   uint64_t file_size_;
   uint64_t file_id_;
 
@@ -85,6 +87,7 @@ class ZoneFile {
 
  public:
 
+  // the level, and the smallest and largest keys of the SST file
   int level_ = -1;
   InternalKey smallest_;
   InternalKey largest_;
@@ -94,7 +97,7 @@ class ZoneFile {
   uint64_t num_deletions_ = 0;
   uint64_t num_range_deletions_ = 0;
   
-  bool has_keys_ = false;
+  bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
   bool is_recorded_ = false;
 
   int rank_ = 100000;
@@ -183,6 +186,8 @@ class ZoneFile {
   void ReleaseActiveZone();
   void SetActiveZone(Zone* zone);
   IOStatus CloseActiveZone();
+  // Adds the record of this file to the container in ZonedBlockDevice
+  // called in CloseWR()
   void CreateOrUpdateRecord();
 
  public:
@@ -222,6 +227,8 @@ class ZoneFile {
   };
 };
 
+// FSWritableFile is the file wrapper used by RocksDB for writing to files
+// Every FileSystem implementation must extend this class with its own write implementation
 class ZonedWritableFile : public FSWritableFile {
  public:
   explicit ZonedWritableFile(ZonedBlockDevice* zbd, bool buffered,
@@ -287,6 +294,8 @@ class ZonedWritableFile : public FSWritableFile {
   bool buffered;
   char* sparse_buffer;
   char* buffer;
+  // the size of each buffer, should be enough to hold and entire file
+  // default is 64+1 MB for 64 MB SST files, can be tuned using params.txt for smaller/larget SST files
   uint32_t buffer_size_megabytes;
   size_t buffer_sz;
   uint32_t block_sz;
@@ -298,11 +307,19 @@ class ZonedWritableFile : public FSWritableFile {
   std::shared_ptr<ZoneFile> zoneFile_;
   MetadataWriter* metadata_writer_;
 
-  std::mutex buffer_mtx_;
+  std::mutex buffer_mtx_; // protects the buffer during memory allocation
 
+  // maximum number of buffers that can be allocated for writing files
+  // used for limiting memory usage
+  // tunable parameter from params.txt
   static inline uint32_t max_buffer_count = INT32_MAX;
+  // incremented when buffer is allocated in the constructor
+  // decremented when buffer is de-allocated in the destructor
   static inline uint32_t curr_buffer_count = 0;
 
+  // if it isn't possible to allocate a buffer because curr_buffer_count == max_buffer_count,
+  // wait for one of the buffers from other files to be de-allocated, which will decrease curr_buffer_count
+  // the condition_variable is used for waiting, along with buffer_count_mtx_
   static inline std::mutex buffer_count_mtx_;
   static inline std::condition_variable buffer_count_condvar_;
 };

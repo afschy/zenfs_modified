@@ -106,7 +106,7 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneLeastWear(Zone **zone_out) {
     }
 
     // Skip this zone if it's not better than the already chosen zone
-    if(allocated_zone->reset_count_ > z->reset_count_) {
+    if(allocated_zone->reset_count_ < z->reset_count_) {
       s = z->CheckRelease();
       if (!s.ok()) return s;
       continue;
@@ -154,11 +154,14 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
   std::sort(sorted_io_zones.begin(), sorted_io_zones.end(), [](const Zone* &a, const Zone* &b)
             { return a->reset_count_ < b->reset_count_; });
 
+  // divide the sorted list of zones into max_level number of intervals
+  // each possible level gets its own "perfect" interval
   double interval = 1.00 * sorted_io_zones.size() / zenfs_parameters_.max_level;
   int lower_index = interval * (level-1), upper_index = ceil(interval * level);
   lower_index = std::max(lower_index, 0);
   upper_index = std::min(upper_index, int(sorted_io_zones.size()));
 
+  // try to find a zone in the perfect interval
   IOStatus s;
   Zone* allocated_zone = nullptr;
   for (int i = lower_index; i < upper_index; i++) {
@@ -180,6 +183,8 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
     return IOStatus::OK();
   }
 
+  // failed to find a zone in the perfect interval
+  // try to find a zone closest to the perfect interval
   Zone* upper_alloc = nullptr;
   int upper_alloc_index = sorted_io_zones.size()-1;
   
@@ -216,17 +221,20 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
     if(!s.ok()) return s;
   }
 
+  // failed, fallback to default
   if(lower_alloc == nullptr && upper_alloc == nullptr)
-    return IOStatus::OK();
+    return AllocateEmptyZoneDefault(zone_out);
   
   if (lower_alloc == nullptr)
     *zone_out = upper_alloc;
   else if (upper_alloc == nullptr)
     *zone_out = lower_alloc;
+  // lower_alloc is closer to the perfect range than upper_alloc
   else if (lower_index - lower_alloc_index < upper_alloc_index - upper_index) {
     *zone_out = lower_alloc;
     upper_alloc->CheckRelease();
   }
+  // upper_alloc is closer to the perfect range than lower_alloc
   else {
     *zone_out = upper_alloc;
     lower_alloc->CheckRelease();
@@ -236,7 +244,7 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
 }
 
 void ZonedBlockDevice::AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr) {
-  std::lock_guard(levelwise_files_mtx_);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
   if(!zonefile_ptr->has_keys_) return;
   if(zonefile_ptr->level_ < 0) return;
@@ -247,6 +255,7 @@ void ZonedBlockDevice::AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr)
     levelwise_file_list_.resize(level + 1);
 
   for(auto it=levelwise_file_list_[level].begin(); it != levelwise_file_list_[level].end(); ++it) {
+    // look for a file whose smallest key is larger than the new file's smallest key
     if (zonefile_ptr->icmp_.Compare(zonefile_ptr->smallest_, (*it)->smallest_) >= 0)
       continue;
     
@@ -259,8 +268,7 @@ void ZonedBlockDevice::AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr)
 }
 
 void ZonedBlockDevice::RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr) {
-  std::lock_guard(levelwise_files_mtx_);
-  // std::shared_ptr<ZoneFile> zonefile_ptr(zonefile);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   for(int i=0; i<levelwise_file_list_.size(); i++)
     levelwise_file_list_[i].remove(zonefile_ptr);
 }
@@ -302,6 +310,7 @@ ZonedBlockDevice::MatchLifetimeBased(
   Zone *allocated_zone = nullptr;
   IOStatus s;
 
+  // choose the zone with the lowest lifetime difference with the given file
   for (const auto z : io_zones) {
     if (!z->Acquire())
       continue;
@@ -343,15 +352,16 @@ ZonedBlockDevice::MatchCAZA(
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity = 0) {
   
-  std::lock_guard(levelwise_files_mtx_);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   int level = zonefile->level_;
 
   std::vector<std::shared_ptr<ZoneFile>> overlapping_files;
-  if(GetPolicy(level) == GetPolicy(level-1))
+  if(GetPolicy(level-1) == kCAZA || GetSecondaryPolicy(level-1) == kCAZA)
     GetOverlappingFiles(overlapping_files, zonefile, level-1);
-  if(GetPolicy(level) == GetPolicy(level+1))
+  if(GetPolicy(level+1) == kCAZA || GetSecondaryPolicy(level+1) == kCAZA)
     GetOverlappingFiles(overlapping_files, zonefile, level+1);
   
+  // no overlapping files yet, can't apply CAZA
   if(!overlapping_files.size()) {
     *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
     return IOStatus::OK();
@@ -364,6 +374,7 @@ ZonedBlockDevice::MatchCAZA(
   uint64_t highest_contribution = 0;
   IOStatus s;
 
+  // allocate the zone with the highest number of overlapping bytes
   for (const auto z : io_zones) {
     if (!z->Acquire())
       continue;
@@ -408,13 +419,15 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity = 0) {
-  std::lock_guard(levelwise_files_mtx_);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
   int level = zonefile->level_;
   *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
+  // level doesn't exist
   if(level < 0 || level >= levelwise_file_list_.size())
     return IOStatus::OK();
 
+  // find the correct spot for the given file
   auto it_middle = levelwise_file_list_[level].begin();
   int index_middle = 0;
   while(it_middle != levelwise_file_list_[level].end()) {
@@ -423,18 +436,15 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     it_middle++;
     index_middle++;
   }
-  
-  if(it_middle == levelwise_file_list_[level].end())  // the zonefile in question is not in the level's record
-    return IOStatus::OK();
 
   std::map<uint64_t, uint64_t> contribution_map;
   
   auto it_forward = it_middle;
-  it_forward++;
   double factor = 1.0;
-  for(int i = index_middle+1; i<levelwise_file_list_[level].size(); i++) {
+  for(int i = index_middle; i<levelwise_file_list_[level].size(); i++) {
+    if(*it_forward == zonefile) continue;
     GetPerZoneContribution(*it_forward, contribution_map, factor);
-    factor *= 0.8;
+    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
     if(factor < 0.2)
       factor = 0.2;
     it_forward++;
@@ -445,7 +455,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   factor = 1.0;
   for(int i = index_middle-1; i >= 0; i--) {
     GetPerZoneContribution(*it_back, contribution_map, factor);
-    factor *= 0.8;
+    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
     if(factor < 0.2)
       factor = 0.2;
     it_back--;
@@ -455,6 +465,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   uint64_t highest_contribution = 0;
   IOStatus s;
 
+  // choose the zone with the highest weighted contribution from same-level files
   for (const auto z : io_zones) {
     if (!z->Acquire())
       continue;
@@ -544,6 +555,7 @@ ZonedBlockDevice::MatchTombstoneDensity(
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity = 0) {
   
+  // this file is unfit for this policy, transfer responsibility to fallback/default policy
   if(!IsHighTombstone(zonefile)) {
     *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
     *zone_out = nullptr;
@@ -648,9 +660,10 @@ ZonedBlockDevice::MatchOverlapChildren(
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity = 0) {
-  std::lock_guard(levelwise_files_mtx_);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   int level = zonefile->level_;
 
+  // trivial moves can happen, simulating those
   while(level < zenfs_parameters_.max_level) {
     if(GetOverlapCount(zonefile, level+1))
       break;
@@ -658,13 +671,16 @@ ZonedBlockDevice::MatchOverlapChildren(
   }
 
   std::vector<std::shared_ptr<ZoneFile>> own_level_ranking;
+  // copy levelwise_file_list_[level]
   own_level_ranking.push_back(zonefile);
   for(auto it = levelwise_file_list_[level].begin(); it != levelwise_file_list_[level].end(); ++it) {
     if((*it) == zonefile) continue;
     own_level_ranking.emplace_back(*it);
   }
+  // compute ranking based on overlap (lower overlap -> higher ranking)
   OverlapRankHelper(own_level_ranking, level, level+1);
 
+  // also compute the ranking of upper level files
   std::vector<std::shared_ptr<ZoneFile>> upper_level_ranking;
   if(level-1 > 0) {
     for(auto it = levelwise_file_list_[level-1].begin(); it != levelwise_file_list_[level-1].end(); ++it) {
@@ -674,6 +690,10 @@ ZonedBlockDevice::MatchOverlapChildren(
   }
   OverlapRankHelper(upper_level_ranking, level-1, level);
 
+  // A file can participate in compaction in two ways:
+  // 1. The file is chosen for compaction
+  // 2. The file is victim of a compaction from the upper level
+  // So, the ranking of the overlapping files in the upper level is also taken into account for each file
   for(int i=0; i<own_level_ranking.size(); i++) {
     for(int j=0; j<upper_level_ranking.size(); j++) {
       if(IsOverlapping(own_level_ranking[i], upper_level_ranking[j], zonefile->icmp_)) {
@@ -687,6 +707,7 @@ ZonedBlockDevice::MatchOverlapChildren(
     return left->rank_ < right->rank_;
   });
 
+  // get the ranking index of the new file
   int zonefile_index = 0;
   while(zonefile_index < own_level_ranking.size()) {
     if(own_level_ranking[zonefile_index] == zonefile)
@@ -694,8 +715,9 @@ ZonedBlockDevice::MatchOverlapChildren(
     zonefile_index++;
   }
 
+  // get the amount of data from closely-ranked files held by each zone
   std::map<uint64_t, uint64_t> contribution_map;
-  double factor = 1.0;
+  double factor = 1.0;  // closer files have more weight than farther ones
   for(int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
     GetPerZoneContribution(own_level_ranking[i], contribution_map, factor);
     factor *= 0.5;
@@ -756,7 +778,7 @@ ZonedBlockDevice::MatchOverlapGrandchildren(
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity = 0) {
 
-  std::lock_guard(levelwise_files_mtx_);
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   int level = zonefile->level_;
 
   while(level < zenfs_parameters_.max_level) {

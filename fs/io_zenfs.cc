@@ -792,6 +792,7 @@ void ZoneFile::UpdateInternalKeys(const Slice& key) {
     smallest_.DecodeFrom(key);
   }
   largest_.DecodeFrom(key);
+  has_keys_ = true;
 }
 
 void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp) {
@@ -801,6 +802,7 @@ void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalK
   if (largest_.size() == 0 || icmp.Compare(largest_, end) < 0) {
     largest_ = end;
   }
+  has_keys_ = true;
 }
 
 void ZoneFile::UpdateMetadata(const TableProperties& table_properties) {

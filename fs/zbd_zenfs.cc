@@ -584,10 +584,11 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     unsigned int *best_diff_out,
     Zone **zone_out, uint32_t min_capacity) {
   
-  //TODO: Reconsider when the keys are given to the ZoneFile, maybe implement buffering
+  // If not SST file or required info missing, use the default
   if(zonefile->level_ < 0 || !zonefile->has_keys_ || zonefile->GetIOType() != IOType::kData)
     return MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out);
   
+  // function pointer type that can hold any instance of a Match.* function
   typedef IOStatus (ZonedBlockDevice::*MatchFunctionType)(std::shared_ptr<ZoneFile> zonefile, Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out, Zone **zone_out, uint32_t min_capacity);
   static std::unordered_map<MappingPolicyType, MatchFunctionType> function_map;
 
@@ -615,7 +616,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   }
   else {
     primary_policy = zenfs_parameters_.middle_level_policy;
-    fallback_policy = zenfs_parameters_.lower_level_policy_fallback;
+    fallback_policy = zenfs_parameters_.middle_level_policy_fallback;
   }
 
   MatchFunctionType primary_policy_function = function_map[primary_policy];
@@ -625,10 +626,11 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   Zone* old_zone = *zone_out;
   
   s = (this->*primary_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
-  if(*zone_out != old_zone)
+  if(*zone_out != old_zone) // found a zone
     return s;
 
   s = (this->*fallback_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  // primary policy needs a special zone but didn't find one, should open a new zone for that purpose
   if(primary_policy == kArrivalTimeBased || primary_policy == kClusterTogether)
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   if(primary_policy == kTombstoneDensity && IsHighTombstone(zonefile))
@@ -642,10 +644,10 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
 }
 
 IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level=-1) {
-  static std::mutex mtx;
-  std::unique_lock<std::mutex> lock(mtx);
+  zenfs_parameters_.lock_max_level.lock();
   if(level>0 && level>(int)zenfs_parameters_.max_level)
     zenfs_parameters_.max_level = level;
+  zenfs_parameters_.lock_max_level.unlock();
 
   switch(zenfs_parameters_.empty_zone_allocator) {
     case kDefault:
@@ -735,8 +737,10 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
                                           Zone **out_zone,
                                           std::shared_ptr<ZoneFile> zonefile) {
 
+  zenfs_parameters_.lock_max_level.lock();
   if(zonefile->level_ > zenfs_parameters_.max_level)
     zenfs_parameters_.max_level = zonefile->level_;
+  zenfs_parameters_.lock_max_level.unlock();
 
   Zone *allocated_zone = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
