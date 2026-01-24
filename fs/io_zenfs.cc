@@ -255,6 +255,11 @@ std::string ZoneFile::GetFilename() { return linkfiles_[0]; }
 time_t ZoneFile::GetFileModificationTime() { return m_time_; }
 
 uint64_t ZoneFile::GetFileSize() { return file_size_; }
+uint64_t ZoneFile::GetFileSizeMeta() {
+  if(file_size_meta_ == 0)
+    file_size_meta_ = file_size_;
+  return file_size_meta_;
+}
 void ZoneFile::SetFileSize(uint64_t sz) { file_size_ = sz; }
 void ZoneFile::SetFileModificationTime(time_t mt) { m_time_ = mt; }
 void ZoneFile::SetIOType(IOType io_type) { io_type_ = io_type; }

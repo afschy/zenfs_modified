@@ -317,7 +317,7 @@ class ZonedBlockDevice {
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
   // Creates a ranking of all files in a level based on how much a file overlaps with level+1
-  // Tries to put the new file in the same zone with similar-ranked files
+  // Tries to put the new file in the same zone with similar-ranked files in its level
   // Closer files (rankwise) have higher weight than farther files
   IOStatus MatchOverlapChildren(std::shared_ptr<ZoneFile> zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
@@ -328,6 +328,13 @@ class ZonedBlockDevice {
                                       Env::WriteLifeTimeHint file_lifetime,
                                       unsigned int *best_diff_out, Zone **zone_out,
                                       uint32_t min_capacity = 0);
+  // Creates a ranking of all files in a level based on compensated file size
+  // Tries to put the new file in the same zone with similar-ranked files in its level
+  // Closer files (rankwise) have higher weight than farther files
+  IOStatus MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
+                                Env::WriteLifeTimeHint file_lifetime,
+                                unsigned int *best_diff_out, Zone **zone_out,
+                                uint32_t min_capacity = 0);
   
   // Related to the allocation of a new empty zone when needed
   // Only relevant when static zone-to-block mapping is used in the underlying ZNS SSD
@@ -346,8 +353,8 @@ class ZonedBlockDevice {
   // levelwise_files_mtx_ must be held before calling
   // Returns an array of pointers to files that overlap with zonefile_ptr in a target_level
   void GetOverlappingFiles(std::vector<std::shared_ptr<ZoneFile>>& ret_container, std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
-  // Returns the number of files that overlap with zonefile_ptr in target_level
-  int GetOverlapCount(std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
+  // Returns the total number of bytes across files that overlap with zonefile_ptr in target_level
+  uint64_t GetOverlapCount(std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
   // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
   void OverlapRankHelper(std::vector<std::shared_ptr<ZoneFile>>& container, int own_level, int target_level);
   // Returns true if the given files overlap

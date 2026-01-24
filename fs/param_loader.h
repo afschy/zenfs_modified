@@ -22,6 +22,7 @@ enum MappingPolicyType {  // In which zone to put a newly created file
   kClusterTogether, // Try to put everything in the same zone
   kOverlapChildren, // Rank based mapping based on overlap with level-i+1
   kOverlapGrandchildren, // Rank based mapping based on overlap with level-i+2
+  kCompensatedSize, // Rank based mapping based on file sizes adjusted for tombstones
 };
 
 struct ZenfsParamContainer {
@@ -78,6 +79,7 @@ struct ZenfsParamContainer {
         {"kClusterTogether", kClusterTogether},
         {"kOverlapChildren", kOverlapChildren},
         {"kOverlapGrandchildren", kOverlapGrandchildren},
+        {"kCompensatedSize", kCompensatedSize},
       };
 
     std::ifstream infile("../params.txt");

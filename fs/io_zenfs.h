@@ -105,7 +105,7 @@ class ZoneFile {
   bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
   bool is_recorded_ = false;
 
-  int rank_ = 100000;
+  uint64_t rank_ = 100000;
 
   static const int SPARSE_HEADER_SIZE = 8;
 
@@ -141,6 +141,7 @@ class ZoneFile {
   time_t GetFileModificationTime();
   void SetFileModificationTime(time_t mt);
   uint64_t GetFileSize();
+  uint64_t GetFileSizeMeta();
   void SetFileSize(uint64_t sz);
   void ClearExtents();
 

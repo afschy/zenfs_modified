@@ -602,6 +602,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     {kClusterTogether, &MatchClusterTogether},
     {kOverlapChildren, &MatchOverlapChildren},
     {kOverlapGrandchildren, &MatchOverlapGrandchildren},
+    {kCompensatedSize, &MatchCompensatedSize},
   };
 
   MappingPolicyType primary_policy;
