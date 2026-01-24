@@ -176,8 +176,6 @@ class ZonedBlockDevice {
 
   std::shared_ptr<ZenFSMetrics> metrics_;
 
-  // mutex to be acquired when accessing/modifying levelwise_file_list_
-  std::mutex levelwise_files_mtx_;
   // one list for each level
   // the list contains pointers to each known file in the level
   // pointers are sorted on the InternalKey string at ZoneFile::smallest_
@@ -189,6 +187,9 @@ class ZonedBlockDevice {
  public:
   // Stores all new parameters for the platform, loaded from param_loader.h
   ZenfsParamContainer zenfs_parameters_;
+
+  // mutex to be acquired when accessing/modifying levelwise_file_list_
+  std::mutex levelwise_files_mtx_;
 
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
@@ -257,6 +258,8 @@ class ZonedBlockDevice {
   // Searches for and removes a particular file from levelwise_file_list_
   // Called when a file is marked as deleted
   void RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr);
+  // Re-computes the compensated file sizes for all recorded files
+  void RecomputeCompensatedFileSizes();
 
  private:
   IOStatus GetZoneDeferredStatus();

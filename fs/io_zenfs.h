@@ -96,6 +96,11 @@ class ZoneFile {
   uint64_t num_entries_ = 0;
   uint64_t num_deletions_ = 0;
   uint64_t num_range_deletions_ = 0;
+  uint64_t file_size_meta_ = 0;
+  uint64_t compensated_file_size_ = 0;
+  uint64_t compensated_range_deletion_size = 0;
+  SequenceNumber smallest_seqno_ = kMaxSequenceNumber;
+  SequenceNumber largest_seqno_ = 0;
   
   bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
   bool is_recorded_ = false;
@@ -124,11 +129,12 @@ class ZoneFile {
   IOStatus SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime);
   
   void SetLevel(int level=-1);
-  void UpdateInternalKeys(const Slice& key);
-  void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp);
+  void UpdateInternalKeys(const Slice& key, SequenceNumber seqno);
+  void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, SequenceNumber seqno, const InternalKeyComparator& icmp);
   virtual void UpdateMetadata(const TableProperties& table_properties);
-  void UpdateMetadata(const FileMetaData* meta);
+  void UpdateMetadata(const FileMetaData* meta, uint64_t average_value_size=0);
   void SetInternalComparator(const InternalKeyComparator& icmp);
+  void ComputeCompensatedSize();
   
   void SetIOType(IOType io_type);
   std::string GetFilename();
@@ -276,10 +282,10 @@ class ZonedWritableFile : public FSWritableFile {
   }
   void SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint) override;
   void SetLevel(int level=-1) override;
-  virtual void UpdateInternalKeys(const Slice& key) override;
-  virtual void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp);
-  virtual void UpdateMetadata(const TableProperties& table_properties);
-  virtual void UpdateMetadata(const FileMetaData* meta) override;
+  virtual void UpdateInternalKeys(const Slice& key, SequenceNumber seqno) override;
+  virtual void UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, SequenceNumber seqno, const InternalKeyComparator& icmp) override;
+  virtual void UpdateMetadata(const TableProperties& table_properties) override;
+  virtual void UpdateMetadata(const FileMetaData* meta, uint64_t average_value_size=0) override;
   virtual void SetInternalComparator(const InternalKeyComparator& icmp) override;
   virtual Env::WriteLifeTimeHint GetWriteLifeTimeHint() override {
     return zoneFile_->GetWriteLifeTimeHint();

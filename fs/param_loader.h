@@ -26,6 +26,8 @@ enum MappingPolicyType {  // In which zone to put a newly created file
 
 struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kSequential;
+
+  uint64_t average_value_size = 0;
   
   uint8_t max_level = 1;
   std::mutex lock_max_level;
@@ -56,11 +58,7 @@ struct ZenfsParamContainer {
   uint32_t buffer_count_max = 20;
 
   void LoadParamsFromFile() {
-    std::ifstream infile("../params.txt");
-    std::string type, value;
-
-    while(infile >> type >> value) {
-      static std::unordered_map<std::string, EmptyZoneAllocType>
+    static std::unordered_map<std::string, EmptyZoneAllocType>
       empty_zone_allocator_map = {
         {"kDefault", kDefault},
         {"kSequential", kSequential},
@@ -69,7 +67,7 @@ struct ZenfsParamContainer {
         {"kHotnessBased", kHotnessBased}
       };
 
-      static std::unordered_map<std::string, MappingPolicyType>
+    static std::unordered_map<std::string, MappingPolicyType>
       mapping_policy_map = {
         {"kLifetimeBased", kLifetimeBased},
         {"kCAZA", kCAZA},
@@ -81,6 +79,11 @@ struct ZenfsParamContainer {
         {"kOverlapChildren", kOverlapChildren},
         {"kOverlapGrandchildren", kOverlapGrandchildren},
       };
+
+    std::ifstream infile("../params.txt");
+    std::string type, value;
+
+    while(infile >> type >> value) {
 
       if(type == "empty_zone_allocator" && empty_zone_allocator_map.find(value) != empty_zone_allocator_map.end())
         empty_zone_allocator = empty_zone_allocator_map[value];
@@ -105,6 +108,12 @@ struct ZenfsParamContainer {
 
       // else if(type == "fallback_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
       //   fallback_policy = mapping_policy_map[value];
+
+      else if(type == "average_value_size") {
+        int value_int = std::stoi(value);
+        if(value_int > 0)
+          average_value_size = value_int;
+      }
 
       else if(type == "tombstone_density") {
         double value_double = std::stod(value);

@@ -273,6 +273,14 @@ void ZonedBlockDevice::RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_p
     levelwise_file_list_[i].remove(zonefile_ptr);
 }
 
+void ZonedBlockDevice::RecomputeCompensatedFileSizes() {
+  std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
+
+  for(int i=0; i<levelwise_file_list_.size(); i++)
+    for(auto it=levelwise_file_list_[i].begin(); it != levelwise_file_list_[i].end(); ++it)
+      (*it)->ComputeCompensatedSize();
+}
+
 void ZonedBlockDevice::GetOverlappingFiles(
     std::vector<std::shared_ptr<ZoneFile>>& ret_container,
     std::shared_ptr<ZoneFile> zonefile_ptr,

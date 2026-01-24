@@ -787,15 +787,18 @@ void ZoneFile::SetLevel(int level=-1) {
     ext->level_ = level;
 }
 
-void ZoneFile::UpdateInternalKeys(const Slice& key) {
+void ZoneFile::UpdateInternalKeys(const Slice& key, SequenceNumber seqno) {
   if (smallest_.size() == 0) {
     smallest_.DecodeFrom(key);
   }
   largest_.DecodeFrom(key);
   has_keys_ = true;
+
+  smallest_seqno_ = std::min(smallest_seqno_, seqno);
+  largest_seqno_ = std::max(largest_seqno_, seqno);
 }
 
-void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp) {
+void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, SequenceNumber seqno, const InternalKeyComparator& icmp) {
   if (smallest_.size() == 0 || icmp.Compare(start, smallest_) < 0) {
     smallest_ = start;
   }
@@ -803,6 +806,9 @@ void ZoneFile::UpdateInternalKeysRange(const InternalKey& start, const InternalK
     largest_ = end;
   }
   has_keys_ = true;
+
+  smallest_seqno_ = std::min(smallest_seqno_, seqno);
+  largest_seqno_ = std::max(largest_seqno_, seqno);
 }
 
 void ZoneFile::UpdateMetadata(const TableProperties& table_properties) {
@@ -811,10 +817,16 @@ void ZoneFile::UpdateMetadata(const TableProperties& table_properties) {
   num_range_deletions_ = table_properties.num_range_deletions;
 }
 
-void ZoneFile::UpdateMetadata(const FileMetaData* meta) {
+void ZoneFile::UpdateMetadata(const FileMetaData* meta, uint64_t average_value_size=0) {
   num_entries_ = meta->num_entries;
   num_deletions_ = meta->num_deletions;
   num_range_deletions_ = meta->num_range_deletions;
+  file_size_meta_ = std::max(file_size_meta_, meta->fd.GetFileSize());
+  compensated_range_deletion_size = std::max(compensated_range_deletion_size, meta->compensated_range_deletion_size);
+
+  if(average_value_size == 0) return;
+  std::lock_guard<std::mutex> lk(zbd_->levelwise_files_mtx_);
+  zbd_->zenfs_parameters_.average_value_size = average_value_size;
 }
 
 void ZoneFile::SetInternalComparator(const InternalKeyComparator& icmp) {
@@ -842,6 +854,20 @@ void ZoneFile::CreateOrUpdateRecord() {
     zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
   zbd_->AddZoneFileRecord(std::shared_ptr<ZoneFile>(this));
   is_recorded_ = true;
+}
+
+void ZoneFile::ComputeCompensatedSize() {
+  uint64_t average_value_size = zbd_->zenfs_parameters_.average_value_size;
+  if(file_size_meta_ == 0)
+    file_size_meta_ = file_size_;
+  compensated_file_size_ = file_size_meta_;
+  
+  if ((num_deletions_ - num_range_deletions_) * 2 >= num_entries_) {
+    compensated_file_size_ +=
+        ((num_deletions_ - num_range_deletions_) * 2 - num_entries_) *
+        average_value_size * 2;
+  }
+  compensated_file_size_ += compensated_range_deletion_size;
 }
 
 ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
@@ -1119,20 +1145,20 @@ void ZonedWritableFile::SetLevel(int level=-1) {
   zoneFile_->SetLevel(level);
 }
 
-void ZonedWritableFile::UpdateInternalKeys(const Slice& key) {
-  zoneFile_->UpdateInternalKeys(key);
+void ZonedWritableFile::UpdateInternalKeys(const Slice& key, SequenceNumber seqno) {
+  zoneFile_->UpdateInternalKeys(key, seqno);
 }
 
-void ZonedWritableFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, const InternalKeyComparator& icmp) {
-  zoneFile_->UpdateInternalKeysRange(start, end, icmp);
+void ZonedWritableFile::UpdateInternalKeysRange(const InternalKey& start, const InternalKey& end, SequenceNumber seqno, const InternalKeyComparator& icmp) {
+  zoneFile_->UpdateInternalKeysRange(start, end, seqno, icmp);
 }
 
 void ZonedWritableFile::UpdateMetadata(const TableProperties& table_properties) {
   zoneFile_->UpdateMetadata(table_properties);
 }
 
-void ZonedWritableFile::UpdateMetadata(const FileMetaData* meta) {
-  zoneFile_->UpdateMetadata(meta);
+void ZonedWritableFile::UpdateMetadata(const FileMetaData* meta, uint64_t average_value_size=0) {
+  zoneFile_->UpdateMetadata(meta, average_value_size);
 }
 
 void ZonedWritableFile::SetInternalComparator(const InternalKeyComparator& icmp) {
