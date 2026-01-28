@@ -351,7 +351,7 @@ void ZenFS::GCWorker() {
     int max_diff = 0;
     int zone_start_max_diff = -1;
 
-    for(int i=0; i<sorted_snapshots.size(); i++) {
+    for(unsigned int i=0; i<sorted_snapshots.size(); i++) {
       if(size_map.find(sorted_snapshots[i].start) == size_map.end())
         continue;
       int ideal_bin = 1.00 * i / interval;
@@ -368,7 +368,7 @@ void ZenFS::GCWorker() {
 
     migrate_exts.clear();
     for (auto& ext : snapshot.extents_) {
-      if (ext.zone_start == zone_start_max_diff) {
+      if (zone_start_max_diff >= 0 && ext.zone_start == (unsigned)zone_start_max_diff) {
         migrate_exts.push_back(&ext);
       }
     }

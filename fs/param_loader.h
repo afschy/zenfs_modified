@@ -51,7 +51,6 @@ struct ZenfsParamContainer {
   //TODO: gc trigger based on invalid amount of data per zone and/or capacity percentage per zone
   //can mix the two potentially
   uint64_t gc_slope = 3; // GC aggresiveness
-  bool cold_migration = false; // Periodically transfer cold data into high-wear zones
   uint64_t gc_pause_seconds = 10; // The interval in seconds between GC activations
   uint8_t cold_migration = 0; // Move long-lived files from low-wear to high-wear zones
 
@@ -121,11 +120,6 @@ struct ZenfsParamContainer {
         double value_double = std::stod(value);
         if(value_double >= 0.0 && value_double <= 1.0)
           tombstone_density = value_double;
-      }
-
-      else if(type == "cold_migration") {
-        int value_int = std::stoi(value);
-        cold_migration = value_int;
       }
 
       else if(type == "gc_start_level") {

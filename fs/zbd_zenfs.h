@@ -29,13 +29,21 @@
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
+#include "db/dbformat.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+// the zone allocator must open a new zone, finishing existing zones if needed
+#define LIFETIME_DIFF_NOT_GOOD (100)
+// the zone allocator should open a new zone if it can be done without finishing an existing zone
+#define LIFETIME_DIFF_COULD_BE_WORSE (50)
 
 class ZonedBlockDevice;
 class ZonedBlockDeviceBackend;
 class ZoneSnapshot;
 class ZenFSSnapshotOptions;
+class ZoneExtent;
+class ZoneFile;
 
 class ZoneList {
  private:
@@ -94,7 +102,15 @@ class Zone {
 
   void EncodeJson(std::ostream &json_stream);
 
-  inline IOStatus CheckRelease();
+  inline IOStatus CheckRelease() {
+    if (!Release()) {
+      assert(false);
+      return IOStatus::Corruption("Failed to unset busy flag of zone " +
+                                  std::to_string(GetZoneNr()));
+    }
+
+    return IOStatus::OK();
+  }
 };
 
 // Calls the underlying ZNS library to perform zone operations
@@ -381,32 +397,231 @@ class ZonedBlockDevice {
     if(level >= zenfs_parameters_.max_boundary) return zenfs_parameters_.lower_level_policy_fallback;
     return zenfs_parameters_.middle_level_policy_fallback;
   }
+
+  // Used by MatchLifetimeBased
+  static unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
+                                      Env::WriteLifeTimeHint file_lifetime) {
+    assert(file_lifetime <= Env::WLTH_EXTREME);
+
+    if ((file_lifetime == Env::WLTH_NOT_SET) ||
+        (file_lifetime == Env::WLTH_NONE)) {
+      if (file_lifetime == zone_lifetime) {
+        return 0;
+      } else {
+        return LIFETIME_DIFF_NOT_GOOD;
+      }
+    }
+
+    if (zone_lifetime > file_lifetime) return zone_lifetime - file_lifetime;
+    if (zone_lifetime == file_lifetime) return LIFETIME_DIFF_COULD_BE_WORSE;
+
+    return LIFETIME_DIFF_NOT_GOOD;
+  }
 };
 
-// the zone allocator must open a new zone, finishing existing zones if needed
-#define LIFETIME_DIFF_NOT_GOOD (100)
-// the zone allocator should open a new zone if it can be done without finishing an existing zone
-#define LIFETIME_DIFF_COULD_BE_WORSE (50)
+class ZoneExtent {  // part of a file in a specific zone
+ public:
+  uint64_t start_;
+  uint64_t length_;
+  Zone* zone_;
+  int level_;
 
-// Used by MatchLifetimeBased
-unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
-                             Env::WriteLifeTimeHint file_lifetime) {
-  assert(file_lifetime <= Env::WLTH_EXTREME);
+  explicit ZoneExtent(uint64_t start, uint64_t length, Zone* zone, int level);
+  Status DecodeFrom(Slice* input);
+  void EncodeTo(std::string* output);
+  void EncodeJson(std::ostream& json_stream);
+};
 
-  if ((file_lifetime == Env::WLTH_NOT_SET) ||
-      (file_lifetime == Env::WLTH_NONE)) {
-    if (file_lifetime == zone_lifetime) {
-      return 0;
-    } else {
-      return LIFETIME_DIFF_NOT_GOOD;
+class ZoneFile;
+
+/* Interface for persisting metadata for files */
+class MetadataWriter {
+ public:
+  virtual ~MetadataWriter();
+  virtual IOStatus Persist(ZoneFile* zoneFile) = 0;
+};
+
+class ZoneFile {
+ private:
+  const uint64_t NO_EXTENT = 0xffffffffffffffff;
+
+  ZonedBlockDevice* zbd_;
+
+  std::vector<ZoneExtent*> extents_;  // parts of a file can be spread across multiple zones
+  std::vector<std::string> linkfiles_;
+
+  // the zone the file will be put, as long as there is enough space
+  // nullptr by default, allocated using AllocateIOZone when needed
+  Zone* active_zone_;
+  uint64_t extent_start_ = NO_EXTENT;
+  uint64_t extent_filepos_ = 0;
+
+  Env::WriteLifeTimeHint lifetime_;
+  IOType io_type_; /* Only used when writing, for SST files value should be kData */
+  uint64_t file_size_;
+  uint64_t file_id_;
+
+  uint32_t nr_synced_extents_ = 0;
+  bool open_for_wr_ = false;
+  std::mutex open_for_wr_mtx_;
+
+  time_t m_time_;
+  bool is_sparse_ = false;
+  bool is_deleted_ = false;
+
+  MetadataWriter* metadata_writer_ = NULL;
+
+  std::mutex writer_mtx_;
+  std::atomic<int> readers_{0};
+
+ public:
+
+  // the level, and the smallest and largest keys of the SST file
+  int level_ = -1;
+  InternalKey smallest_;
+  InternalKey largest_;
+  InternalKeyComparator icmp_;
+
+  uint64_t num_entries_ = 0;
+  uint64_t num_deletions_ = 0;
+  uint64_t num_range_deletions_ = 0;
+  uint64_t file_size_meta_ = 0;
+  uint64_t compensated_file_size_ = 0;
+  uint64_t compensated_range_deletion_size_ = 0;
+  SequenceNumber smallest_seqno_ = kMaxSequenceNumber;
+  SequenceNumber largest_seqno_ = 0;
+  
+  bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
+  bool is_recorded_ = false;
+
+  uint64_t rank_ = 100000;
+
+  static const int SPARSE_HEADER_SIZE = 8;
+
+  explicit ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id_,
+                    MetadataWriter* metadata_writer);
+
+  virtual ~ZoneFile();
+
+  void AcquireWRLock();
+  bool TryAcquireWRLock();
+  void ReleaseWRLock();
+
+  IOStatus CloseWR();
+  bool IsOpenForWR();
+
+  IOStatus PersistMetadata();
+
+  IOStatus Append(void* buffer, int data_size);
+  IOStatus BufferedAppend(char* data, uint32_t size);
+  IOStatus SparseAppend(char* data, uint32_t size);
+  IOStatus SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime);
+  
+  void SetLevel(int level=-1);
+  void UpdateInternalKeys(const Slice& key, SequenceNumber seqno);
+  void UpdateInternalKeysRange(const Slice& start, const Slice& end, SequenceNumber seqno, const CompareInterface* icmp);
+  virtual void UpdateMetadata(const TableProperties& table_properties);
+  void UpdateMetadata(uint64_t num_entries, uint64_t num_deletions, uint64_t num_range_deletions, uint64_t file_size, uint64_t compensated_range_deletion_size, uint64_t average_value_size=0);
+  void SetInternalComparator(CompareInterface* icmp);
+  void ComputeCompensatedSize();
+  
+  void SetIOType(IOType io_type);
+  std::string GetFilename();
+  time_t GetFileModificationTime();
+  void SetFileModificationTime(time_t mt);
+  uint64_t GetFileSize();
+  uint64_t GetFileSizeMeta();
+  void SetFileSize(uint64_t sz);
+  void ClearExtents();
+
+  uint32_t GetBlockSize() { return zbd_->GetBlockSize(); }
+  ZonedBlockDevice* GetZbd() { return zbd_; }
+  std::vector<ZoneExtent*> GetExtents() { return extents_; }
+  Env::WriteLifeTimeHint GetWriteLifeTimeHint() { return lifetime_; }
+
+  IOStatus PositionedRead(uint64_t offset, size_t n, Slice* result,
+                          char* scratch, bool direct);
+  ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
+  void PushExtent();
+  IOStatus AllocateNewZone();
+
+  void EncodeTo(std::string* output, uint32_t extent_start);
+  void EncodeUpdateTo(std::string* output) {
+    EncodeTo(output, nr_synced_extents_);
+  };
+  void EncodeSnapshotTo(std::string* output) { EncodeTo(output, 0); };
+  void EncodeJson(std::ostream& json_stream);
+  void MetadataSynced() { nr_synced_extents_ = extents_.size(); };
+  void MetadataUnsynced() { nr_synced_extents_ = 0; };
+
+  IOStatus MigrateData(uint64_t offset, uint32_t length, Zone* target_zone);
+
+  Status DecodeFrom(Slice* input);
+  Status MergeUpdate(std::shared_ptr<ZoneFile> update, bool replace);
+
+  uint64_t GetID() { return file_id_; }
+
+  bool IsSparse() { return is_sparse_; };
+
+  void SetSparse(bool is_sparse) { is_sparse_ = is_sparse; };
+  uint64_t HasActiveExtent() { return extent_start_ != NO_EXTENT; };
+  uint64_t GetExtentStart() { return extent_start_; };
+
+  IOStatus Recover();
+
+  void ReplaceExtentList(std::vector<ZoneExtent*> new_list);
+  void AddLinkName(const std::string& linkfile);
+  IOStatus RemoveLinkName(const std::string& linkfile);
+  IOStatus RenameLink(const std::string& src, const std::string& dest);
+  uint32_t GetNrLinks() { return linkfiles_.size(); }
+  const std::vector<std::string>& GetLinkFiles() const { return linkfiles_; }
+
+  IOStatus InvalidateCache(uint64_t pos, uint64_t size);
+
+ private:
+  void ReleaseActiveZone();
+  void SetActiveZone(Zone* zone);
+  IOStatus CloseActiveZone();
+  // Adds the record of this file to the container in ZonedBlockDevice
+  // called in CloseWR()
+  void CreateOrUpdateRecord();
+
+ public:
+  std::shared_ptr<ZenFSMetrics> GetZBDMetrics() { return zbd_->GetMetrics(); };
+  IOType GetIOType() const { return io_type_; };
+  bool IsDeleted() const { return is_deleted_; };
+  void SetDeleted() {
+    is_deleted_ = true;
+    zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+  };
+  IOStatus RecoverSparseExtents(uint64_t start, uint64_t end, Zone* zone);
+
+ public:
+  class ReadLock {
+   public:
+    ReadLock(ZoneFile* zfile) : zfile_(zfile) {
+      zfile_->writer_mtx_.lock();
+      zfile_->readers_++;
+      zfile_->writer_mtx_.unlock();
     }
-  }
+    ~ReadLock() { zfile_->readers_--; }
 
-  if (zone_lifetime > file_lifetime) return zone_lifetime - file_lifetime;
-  if (zone_lifetime == file_lifetime) return LIFETIME_DIFF_COULD_BE_WORSE;
+   private:
+    ZoneFile* zfile_;
+  };
+  class WriteLock {
+   public:
+    WriteLock(ZoneFile* zfile) : zfile_(zfile) {
+      zfile_->writer_mtx_.lock();
+      while (zfile_->readers_ > 0) {
+      }
+    }
+    ~WriteLock() { zfile_->writer_mtx_.unlock(); }
 
-  return LIFETIME_DIFF_NOT_GOOD;
-}
+   private:
+    ZoneFile* zfile_;
+  };
+};
 
 }  // namespace ROCKSDB_NAMESPACE
 

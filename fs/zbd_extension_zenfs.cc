@@ -57,8 +57,8 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneDefault(Zone **zone_out) {
 }
 
 IOStatus ZonedBlockDevice::AllocateEmptyZoneSequential(Zone **zone_out) {
-  static int zone_pos = 0;
-  int curr_traversed = 0;
+  static unsigned int zone_pos = 0;
+  unsigned int curr_traversed = 0;
   
   IOStatus s;
   Zone *allocated_zone = nullptr;
@@ -151,7 +151,7 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
     return AllocateEmptyZoneLeastWear(zone_out);
 
   std::vector<Zone *> sorted_io_zones(io_zones);
-  std::sort(sorted_io_zones.begin(), sorted_io_zones.end(), [](const Zone* &a, const Zone* &b)
+  std::sort(sorted_io_zones.begin(), sorted_io_zones.end(), [](const Zone* a, const Zone* b)
             { return a->reset_count_ < b->reset_count_; });
 
   // divide the sorted list of zones into max_level number of intervals
@@ -188,7 +188,7 @@ IOStatus ZonedBlockDevice::AllocateEmptyZoneHotnessBased(Zone **zone_out, int le
   Zone* upper_alloc = nullptr;
   int upper_alloc_index = sorted_io_zones.size()-1;
   
-  for (int i = upper_index; i < sorted_io_zones.size(); i++) {
+  for (unsigned int i = upper_index; i < sorted_io_zones.size(); i++) {
     Zone* z = sorted_io_zones[i];
     if (!z->Acquire())
       continue;
@@ -250,7 +250,7 @@ void ZonedBlockDevice::AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr)
   if(zonefile_ptr->level_ < 0) return;
   if(zonefile_ptr->GetIOType() != IOType::kData) return;    // not an SST file
   
-  int level = zonefile_ptr->level_;
+  unsigned int level = zonefile_ptr->level_;
   if(level >= levelwise_file_list_.size())
     levelwise_file_list_.resize(level + 1);
 
@@ -269,12 +269,12 @@ void ZonedBlockDevice::AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr)
 
 void ZonedBlockDevice::RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr) {
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
-  for(int i=0; i<levelwise_file_list_.size(); i++)
+  for(unsigned int i=0; i<levelwise_file_list_.size(); i++)
     levelwise_file_list_[i].remove(zonefile_ptr);
 }
 
 void ZonedBlockDevice::RecomputeCompensatedFileSizes() {
-  for(int i=0; i<levelwise_file_list_.size(); i++)
+  for(unsigned int i=0; i<levelwise_file_list_.size(); i++)
     for(auto it=levelwise_file_list_[i].begin(); it != levelwise_file_list_[i].end(); ++it)
       (*it)->ComputeCompensatedSize();
 }
@@ -283,7 +283,7 @@ void ZonedBlockDevice::GetOverlappingFiles(
     std::vector<std::shared_ptr<ZoneFile>>& ret_container,
     std::shared_ptr<ZoneFile> zonefile_ptr,
     int target_level) {
-  if(target_level < 0 || target_level >= levelwise_file_list_.size())
+  if(target_level < 0 || (unsigned)target_level >= levelwise_file_list_.size())
     return;
 
   for(auto it=levelwise_file_list_[target_level].begin(); it != levelwise_file_list_[target_level].end(); ++it) {
@@ -294,7 +294,7 @@ void ZonedBlockDevice::GetOverlappingFiles(
 
 uint64_t ZonedBlockDevice::GetOverlapCount(std::shared_ptr<ZoneFile> zonefile_ptr, int target_level) {
   uint64_t count = 0;
-  if(target_level < 0 || target_level >= levelwise_file_list_.size())
+  if(target_level < 0 || (unsigned)target_level >= levelwise_file_list_.size())
     return count;
 
   for(auto it=levelwise_file_list_[target_level].begin(); it != levelwise_file_list_[target_level].end(); ++it) {
@@ -310,7 +310,7 @@ ZonedBlockDevice::MatchLifetimeBased(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
 
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   Zone *allocated_zone = nullptr;
@@ -356,7 +356,7 @@ ZonedBlockDevice::MatchCAZA(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   int level = zonefile->level_;
@@ -424,13 +424,13 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
   int level = zonefile->level_;
   *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
   // level doesn't exist
-  if(level < 0 || level >= levelwise_file_list_.size())
+  if(level < 0 || (unsigned)level >= levelwise_file_list_.size())
     return IOStatus::OK();
 
   // find the correct spot for the given file
@@ -447,7 +447,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   
   auto it_forward = it_middle;
   double factor = 1.0;
-  for(int i = index_middle; i<levelwise_file_list_[level].size(); i++) {
+  for(unsigned int i = index_middle; i<levelwise_file_list_[level].size(); i++) {
     if(*it_forward == zonefile) continue;
     GetPerZoneContribution(*it_forward, contribution_map, factor);
     factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
@@ -515,7 +515,7 @@ ZonedBlockDevice::MatchArrivalTimeBased(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   Zone *allocated_zone = nullptr;
   IOStatus s;
@@ -559,7 +559,7 @@ ZonedBlockDevice::MatchTombstoneDensity(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   
   // this file is unfit for this policy, transfer responsibility to fallback/default policy
   if(!IsHighTombstone(zonefile)) {
@@ -611,7 +611,7 @@ ZonedBlockDevice::MatchTombstoneTTL(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   // placeholder
   return MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
 }
@@ -621,7 +621,7 @@ ZonedBlockDevice::MatchClusterTogether(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   Zone *allocated_zone = nullptr;
   IOStatus s;
@@ -665,7 +665,7 @@ ZonedBlockDevice::MatchOverlapChildren(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
 
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
@@ -704,8 +704,8 @@ ZonedBlockDevice::MatchOverlapChildren(
   // 1. The file is chosen for compaction
   // 2. The file is victim of a compaction from the upper level
   // So, the ranking of the overlapping files in the upper level is also taken into account for each file
-  for(int i=0; i<own_level_ranking.size(); i++) {
-    for(int j=0; j<upper_level_ranking.size(); j++) {
+  for(unsigned int i=0; i<own_level_ranking.size(); i++) {
+    for(unsigned int j=0; j<upper_level_ranking.size(); j++) {
       if(IsOverlapping(own_level_ranking[i], upper_level_ranking[j], zonefile->icmp_)) {
         own_level_ranking[i]->rank_ += upper_level_ranking[j]->rank_;
         break;
@@ -718,7 +718,7 @@ ZonedBlockDevice::MatchOverlapChildren(
   });
 
   // get the ranking index of the new file
-  int zonefile_index = 0;
+  unsigned int zonefile_index = 0;
   while(zonefile_index < own_level_ranking.size()) {
     if(own_level_ranking[zonefile_index] == zonefile)
       break;
@@ -728,7 +728,7 @@ ZonedBlockDevice::MatchOverlapChildren(
   // get the amount of data from closely-ranked files held by each zone
   std::map<uint64_t, uint64_t> contribution_map;
   double factor = 1.0;  // closer files have more weight than farther ones
-  for(int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
+  for(unsigned int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
     GetPerZoneContribution(own_level_ranking[i], contribution_map, factor);
     factor *= 0.5;
   }
@@ -786,7 +786,7 @@ ZonedBlockDevice::MatchOverlapGrandchildren(
     std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
 
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
@@ -817,8 +817,8 @@ ZonedBlockDevice::MatchOverlapGrandchildren(
   }
   OverlapRankHelper(upper_level_ranking, level-1, level+1);
 
-  for(int i=0; i<own_level_ranking.size(); i++) {
-    for(int j=0; j<upper_level_ranking.size(); j++) {
+  for(unsigned int i=0; i<own_level_ranking.size(); i++) {
+    for(unsigned int j=0; j<upper_level_ranking.size(); j++) {
       if(IsOverlapping(own_level_ranking[i], upper_level_ranking[j], zonefile->icmp_)) {
         own_level_ranking[i]->rank_ += upper_level_ranking[j]->rank_;
         break;
@@ -830,7 +830,7 @@ ZonedBlockDevice::MatchOverlapGrandchildren(
     return left->rank_ < right->rank_;
   });
 
-  int zonefile_index = 0;
+  unsigned int zonefile_index = 0;
   while(zonefile_index < own_level_ranking.size()) {
     if(own_level_ranking[zonefile_index] == zonefile)
       break;
@@ -839,7 +839,7 @@ ZonedBlockDevice::MatchOverlapGrandchildren(
 
   std::map<uint64_t, uint64_t> contribution_map;
   double factor = 1.0;
-  for(int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
+  for(unsigned int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
     GetPerZoneContribution(own_level_ranking[i], contribution_map, factor);
     factor *= 0.5;
   }
@@ -896,7 +896,7 @@ IOStatus
 ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
-    uint32_t min_capacity = 0) {
+    uint32_t min_capacity) {
 
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
@@ -923,7 +923,7 @@ ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
       [](std::shared_ptr<ZoneFile>& left, std::shared_ptr<ZoneFile>& right) {
     return left->compensated_file_size_ > right->compensated_file_size_;
   });
-  for(int i=0; i<own_level_ranking.size(); i++)
+  for(unsigned int i=0; i<own_level_ranking.size(); i++)
     own_level_ranking[i]->rank_ = i+1;
 
   // also compute the ranking of upper level files
@@ -938,15 +938,15 @@ ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
       [](std::shared_ptr<ZoneFile>& left, std::shared_ptr<ZoneFile>& right) {
     return left->compensated_file_size_ > right->compensated_file_size_;
   });
-  for(int i=0; i<upper_level_ranking.size(); i++)
+  for(unsigned int i=0; i<upper_level_ranking.size(); i++)
     upper_level_ranking[i]->rank_ = i+1;
 
   // A file can participate in compaction in two ways:
   // 1. The file is chosen for compaction
   // 2. The file is victim of a compaction from the upper level
   // So, the ranking of the overlapping files in the upper level is also taken into account for each file
-  for(int i=0; i<own_level_ranking.size(); i++) {
-    for(int j=0; j<upper_level_ranking.size(); j++) {
+  for(unsigned int i=0; i<own_level_ranking.size(); i++) {
+    for(unsigned int j=0; j<upper_level_ranking.size(); j++) {
       if(IsOverlapping(own_level_ranking[i], upper_level_ranking[j], zonefile->icmp_)) {
         own_level_ranking[i]->rank_ += upper_level_ranking[j]->rank_;
         break;
@@ -959,7 +959,7 @@ ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
   });
 
   // get the ranking index of the new file
-  int zonefile_index = 0;
+  unsigned int zonefile_index = 0;
   while(zonefile_index < own_level_ranking.size()) {
     if(own_level_ranking[zonefile_index] == zonefile)
       break;
@@ -969,7 +969,7 @@ ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
   // get the amount of data from closely-ranked files held by each zone
   std::map<uint64_t, uint64_t> contribution_map;
   double factor = 1.0;  // closer files have more weight than farther ones
-  for(int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
+  for(unsigned int i = zonefile_index+1; i < own_level_ranking.size(); i++) {
     GetPerZoneContribution(own_level_ranking[i], contribution_map, factor);
     factor *= 0.5;
   }
@@ -1025,21 +1025,21 @@ ZonedBlockDevice::MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
 void ZonedBlockDevice::GetPerZoneContribution(
     std::vector<std::shared_ptr<ZoneFile>>& files,
     std::map<uint64_t, uint64_t>& result,
-    double factor=1.0) {
+    double factor) {
   
-  for(int i=0; i<files.size(); i++)
+  for(unsigned int i=0; i<files.size(); i++)
     GetPerZoneContribution(files[i], result, factor);
 }
 
 void ZonedBlockDevice::GetPerZoneContribution(
     std::shared_ptr<ZoneFile> zonefile,
     std::map<uint64_t, uint64_t>& result,
-    double factor=1.0) {
+    double factor) {
   
   ZoneFileSnapshot snapshot(*zonefile);
   std::vector<ZoneExtentSnapshot> extents = snapshot.extents;
 
-  for(int j=0; j<extents.size(); j++) {
+  for(unsigned int j=0; j<extents.size(); j++) {
     ZoneExtentSnapshot curr_extent = extents[j];
     if(result.count(curr_extent.zone_start) == 0)
       result[curr_extent.zone_start] = 0;
@@ -1051,13 +1051,15 @@ void ZonedBlockDevice::OverlapRankHelper(
     std::vector<std::shared_ptr<ZoneFile>>& container,
     int own_level, int target_level) {
   
-  if(own_level < 0 || own_level >= levelwise_file_list_.size() || target_level < 0 || target_level >= levelwise_file_list_.size()) {
-    for(int i=0; i<container.size(); i++)
+  if(own_level < 0 || (unsigned)own_level >= levelwise_file_list_.size() ||
+      target_level < 0 || (unsigned)target_level >= levelwise_file_list_.size()) {
+    
+    for(unsigned int i=0; i<container.size(); i++)
       container[i]->rank_ = 0;
     return;
   }
   
-  for(int i=0; i<container.size(); i++) {
+  for(unsigned int i=0; i<container.size(); i++) {
     uint64_t count = GetOverlapCount(container[i], target_level);
     container[i]->rank_ = count * 1024U / container[i]->compensated_file_size_;
   }
@@ -1065,7 +1067,7 @@ void ZonedBlockDevice::OverlapRankHelper(
   std::sort(container.begin(), container.end(), [](std::shared_ptr<ZoneFile>& left, std::shared_ptr<ZoneFile>& right){
     return left->rank_ < right->rank_;
   });
-  for(int i=0; i<container.size(); i++)
+  for(unsigned int i=0; i<container.size(); i++)
     container[i]->rank_ = i+1;
 }
 
