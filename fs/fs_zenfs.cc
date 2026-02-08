@@ -898,7 +898,11 @@ IOStatus ZenFS::OpenWritableFile(const std::string& filename,
     /* if reopen is true and the file exists, return it */
     if (reopen && zoneFile != nullptr) {
       zoneFile->AcquireWRLock();
-      result->reset(
+      if (ends_with(fname, ".sst"))
+        result->reset(
+            new ZonedWritableFile(zbd_, true, zoneFile));
+      else
+        result->reset(
           new ZonedWritableFile(zbd_, !file_opts.use_direct_writes, zoneFile));
       return IOStatus::OK();
     }
@@ -933,7 +937,11 @@ IOStatus ZenFS::OpenWritableFile(const std::string& filename,
 
     zoneFile->AcquireWRLock();
     files_.insert(std::make_pair(fname.c_str(), zoneFile));
-    result->reset(
+    if (ends_with(fname, ".sst"))
+      result->reset(
+          new ZonedWritableFile(zbd_, true, zoneFile));
+    else
+      result->reset(
         new ZonedWritableFile(zbd_, !file_opts.use_direct_writes, zoneFile));
   }
 

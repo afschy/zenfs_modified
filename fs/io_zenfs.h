@@ -95,7 +95,7 @@ class ZonedWritableFile : public FSWritableFile {
   bool buffered;
   char* sparse_buffer;
   char* buffer;
-  // the size of each buffer, should be enough to hold and entire file
+  // the size of each buffer, should be enough to hold an entire file
   // default is 64+1 MB for 64 MB SST files, can be tuned using params.txt for smaller/larget SST files
   uint32_t buffer_size_megabytes;
   size_t buffer_sz;
