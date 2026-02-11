@@ -87,12 +87,11 @@ ZonedWritableFile::~ZonedWritableFile() {
     } else {
       free(buffer);
     }
-
-    std::unique_lock lk(buffer_count_mtx_);
-    lk.lock();
-    if(curr_buffer_count > 0)
-      curr_buffer_count--;
-    lk.unlock();
+    {
+      std::unique_lock lk(buffer_count_mtx_);
+      if(curr_buffer_count > 0)
+        curr_buffer_count--;
+    }
     buffer_count_condvar_.notify_all();
   }
 

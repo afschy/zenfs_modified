@@ -195,7 +195,7 @@ class ZonedBlockDevice {
   // one list for each level
   // the list contains pointers to each known file in the level
   // pointers are sorted on the InternalKey string at ZoneFile::smallest_
-  std::vector< std::list< std::shared_ptr<ZoneFile> > > levelwise_file_list_;
+  std::vector< std::list< ZoneFile* > > levelwise_file_list_;
 
   void EncodeJsonZone(std::ostream &json_stream,
                       const std::vector<Zone *> zones);
@@ -221,7 +221,7 @@ class ZonedBlockDevice {
   // Tries to hand over an already open zone (File Placement Policy)
   // If that's not possible/desirable, opens a new zone (New Zone Allocation Policy)
   IOStatus AllocateIOZone(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
-                          Zone **out_zone, std::shared_ptr<ZoneFile> zonefile);
+                          Zone **out_zone, ZoneFile* zonefile);
   IOStatus AllocateMetaZone(Zone **out_meta_zone);
 
   uint64_t GetFreeSpace();
@@ -258,7 +258,7 @@ class ZonedBlockDevice {
 
   IOStatus ReleaseMigrateZone(Zone *zone);
 
-  IOStatus TakeMigrateZone(Zone **out_zone, std::shared_ptr<ZoneFile> zonefile,
+  IOStatus TakeMigrateZone(Zone **out_zone, ZoneFile* zonefile,
                            Env::WriteLifeTimeHint lifetime, uint32_t min_capacity);
 
   void AddBytesWritten(uint64_t written) { bytes_written_ += written; };
@@ -270,10 +270,10 @@ class ZonedBlockDevice {
 
   // Adds a new file to the appropriate level and position of levelwise_file_list_
   // Called after the whole file is written
-  void AddZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr);
+  void AddZoneFileRecord(ZoneFile* zonefile_ptr);
   // Searches for and removes a particular file from levelwise_file_list_
   // Called when a file is marked as deleted
-  void RemoveZoneFileRecord(std::shared_ptr<ZoneFile> zonefile_ptr);
+  void RemoveZoneFileRecord(ZoneFile* zonefile_ptr);
   // Re-computes the compensated file sizes for all recorded files
   void RecomputeCompensatedFileSizes();
 
@@ -287,7 +287,7 @@ class ZonedBlockDevice {
   // Related to choosing the best existing zone for a ZoneFile object
   // Tries to find the zone that best fits the given zonefile's policy
   // Goes to the fallback policy if primary policy fails
-  IOStatus GetBestOpenZoneMatch(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus GetBestOpenZoneMatch(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
@@ -296,58 +296,58 @@ class ZonedBlockDevice {
   // ZenFS default, tries to put the file in a zone with equal or higher lifetime
   // Levels 0 and 1 have WLTH_MEDIUM, level-2 has WLTH_LONG, levels 3 and onward have WLTH_EXTREME
   // RocksDB assigns those before writing
-  IOStatus MatchLifetimeBased(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchLifetimeBased(ZoneFile* zonefile,
                               Env::WriteLifeTimeHint file_lifetime,
                               unsigned int *best_diff_out, Zone **zone_out,
                               uint32_t min_capacity = 0);
   // Looks for files with overlapping keyranges in the upper and lower level
   // Chooses the zone that holds the most amount of data from the overlapping files
-  IOStatus MatchCAZA(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchCAZA(ZoneFile* zonefile,
                       Env::WriteLifeTimeHint file_lifetime,
                       unsigned int *best_diff_out, Zone **zone_out,
                       uint32_t min_capacity = 0);
   // Chooses the zone that holds the most data from adjacent files
   // Closer files have higher weight compared to farther files
-  IOStatus MatchSameLevelNearbyKeys(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchSameLevelNearbyKeys(ZoneFile* zonefile,
                                     Env::WriteLifeTimeHint file_lifetime,
                                     unsigned int *best_diff_out, Zone **zone_out,
                                     uint32_t min_capacity = 0);
   // Fills a zone in order of arrival (per-level)
-  IOStatus MatchArrivalTimeBased(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchArrivalTimeBased(ZoneFile* zonefile,
                                   Env::WriteLifeTimeHint file_lifetime,
                                   unsigned int *best_diff_out, Zone **zone_out,
                                   uint32_t min_capacity = 0);
   // Puts files that exceed the given tombstone ratio (tunable parameter) into a special zone
-  IOStatus MatchTombstoneDensity(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchTombstoneDensity(ZoneFile* zonefile,
                                   Env::WriteLifeTimeHint file_lifetime,
                                   unsigned int *best_diff_out, Zone **zone_out,
                                   uint32_t min_capacity = 0);
   // Placeholder, forwards to MatchLifetimeBased
-  IOStatus MatchTombstoneTTL(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchTombstoneTTL(ZoneFile* zonefile,
                               Env::WriteLifeTimeHint file_lifetime,
                               unsigned int *best_diff_out, Zone **zone_out,
                               uint32_t min_capacity = 0);
   // Puts all files with the kClusterTogether policy in the same zone, doesn't consider any other factor
-  IOStatus MatchClusterTogether(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchClusterTogether(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
   // Creates a ranking of all files in a level based on how much a file overlaps with level+1
   // Tries to put the new file in the same zone with similar-ranked files in its level
   // Closer files (rankwise) have higher weight than farther files
-  IOStatus MatchOverlapChildren(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchOverlapChildren(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
   // Same as MatchOverlapChildren, but for level+2
-  IOStatus MatchOverlapGrandchildren(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchOverlapGrandchildren(ZoneFile* zonefile,
                                       Env::WriteLifeTimeHint file_lifetime,
                                       unsigned int *best_diff_out, Zone **zone_out,
                                       uint32_t min_capacity = 0);
   // Creates a ranking of all files in a level based on compensated file size
   // Tries to put the new file in the same zone with similar-ranked files in its level
   // Closer files (rankwise) have higher weight than farther files
-  IOStatus MatchCompensatedSize(std::shared_ptr<ZoneFile> zonefile,
+  IOStatus MatchCompensatedSize(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
@@ -368,21 +368,21 @@ class ZonedBlockDevice {
 
   // levelwise_files_mtx_ must be held before calling
   // Returns an array of pointers to files that overlap with zonefile_ptr in a target_level
-  void GetOverlappingFiles(std::vector<std::shared_ptr<ZoneFile>>& ret_container, std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
+  void GetOverlappingFiles(std::vector<ZoneFile*>& ret_container, ZoneFile* zonefile_ptr, int target_level);
   // Returns the total number of bytes across files that overlap with zonefile_ptr in target_level
-  uint64_t GetOverlapCount(std::shared_ptr<ZoneFile> zonefile_ptr, int target_level);
+  uint64_t GetOverlapCount(ZoneFile* zonefile_ptr, int target_level);
   // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
-  void OverlapRankHelper(std::vector<std::shared_ptr<ZoneFile>>& container, int own_level, int target_level);
+  void OverlapRankHelper(std::vector<ZoneFile*>& container, int own_level, int target_level);
   // Returns true if the given files overlap
-  bool IsOverlapping(std::shared_ptr<ZoneFile> a, std::shared_ptr<ZoneFile> b, InternalKeyComparator& icmp);
+  bool IsOverlapping(ZoneFile* a, ZoneFile* b, InternalKeyComparator& icmp);
   // Returns true if the ratio of tombstones in the given file is higher than the threshold
-  bool IsHighTombstone(std::shared_ptr<ZoneFile> zonefile_ptr);
+  bool IsHighTombstone(ZoneFile* zonefile_ptr);
 
   // result (output) contains the amount of data each zone holds from the given file(s)
   // the map's key is a zone's first address, and the value is how many bytes of data from the file(s) that zone holds
   // factor is multiplied with the byte count for the file(s), used for giving different weights to different files
-  void GetPerZoneContribution(std::vector<std::shared_ptr<ZoneFile>>& files, std::map<uint64_t, uint64_t>& result, double factor=1.0);
-  void GetPerZoneContribution(std::shared_ptr<ZoneFile> zonefile, std::map<uint64_t, uint64_t>& result, double factor=1.0);
+  void GetPerZoneContribution(std::vector<ZoneFile*>& files, std::map<uint64_t, uint64_t>& result, double factor=1.0);
+  void GetPerZoneContribution(ZoneFile* zonefile, std::map<uint64_t, uint64_t>& result, double factor=1.0);
 
   MappingPolicyType GetPolicy(int level) {
     if(level < 0) return kLifetimeBased;
@@ -592,7 +592,7 @@ class ZoneFile {
   bool IsDeleted() const { return is_deleted_; };
   void SetDeleted() {
     is_deleted_ = true;
-    zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+    zbd_->RemoveZoneFileRecord(this);
   };
   IOStatus RecoverSparseExtents(uint64_t start, uint64_t end, Zone* zone);
 

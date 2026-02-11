@@ -341,9 +341,9 @@ class ZenFS : public FileSystemWrapper {
 
   virtual void MoveFileToNewLevel(const std::string& filename, int new_level) override {
     std::shared_ptr<ZoneFile> zonefile = GetFile(filename);
-    zbd_->RemoveZoneFileRecord(zonefile);
+    zbd_->RemoveZoneFileRecord(zonefile.get());
     zonefile->SetLevel(new_level);
-    zbd_->AddZoneFileRecord(zonefile);
+    zbd_->AddZoneFileRecord(zonefile.get());
   }
 
   IOStatus GetFreeSpace(const std::string& /*path*/,

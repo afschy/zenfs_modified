@@ -19,6 +19,8 @@ endif
 CXXFLAGS +=  $(EXTRA_CXXFLAGS)
 LDFLAGS +=  $(EXTRA_LDFLAGS)
 
+CXXFLAGS += -I../../..
+
 all: $(TARGET) $(TARGET).dbg
 
 $(TARGET).dbg: $(TARGET)

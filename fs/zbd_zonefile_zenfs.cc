@@ -507,7 +507,7 @@ void ZoneFile::PushExtent() {
 
 IOStatus ZoneFile::AllocateNewZone() {
   Zone* zone;
-  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone, std::shared_ptr<ZoneFile>(this));
+  IOStatus s = zbd_->AllocateIOZone(lifetime_, io_type_, &zone, this);
 
   if (!s.ok()) return s;
   if (!zone) {
@@ -879,8 +879,8 @@ void ZoneFile::CreateOrUpdateRecord() {
   if(level_ < 0)
     return;
   if(is_recorded_)
-    zbd_->RemoveZoneFileRecord(std::shared_ptr<ZoneFile>(this));
-  zbd_->AddZoneFileRecord(std::shared_ptr<ZoneFile>(this));
+    zbd_->RemoveZoneFileRecord(this);
+  zbd_->AddZoneFileRecord(this);
   is_recorded_ = true;
 }
 

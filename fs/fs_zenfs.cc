@@ -1884,7 +1884,7 @@ IOStatus ZenFS::MigrateFileExtents(
     Zone* target_zone = nullptr;
 
     // Allocate a new migration zone.
-    s = zbd_->TakeMigrateZone(&target_zone, zfile, zfile->GetWriteLifeTimeHint(),
+    s = zbd_->TakeMigrateZone(&target_zone, zfile.get(), zfile->GetWriteLifeTimeHint(),
                               ext->length_);
     if (!s.ok()) {
       continue;

@@ -26,7 +26,7 @@ enum MappingPolicyType {  // In which zone to put a newly created file
 };
 
 struct ZenfsParamContainer {
-  EmptyZoneAllocType empty_zone_allocator = kSequential;
+  EmptyZoneAllocType empty_zone_allocator = kDefault;
 
   uint64_t average_value_size = 0;
   
@@ -37,14 +37,14 @@ struct ZenfsParamContainer {
 
   double tombstone_density = 0.5;
 
-  MappingPolicyType upper_level_policy = kClusterTogether; // for levels <= min_boundary
+  MappingPolicyType upper_level_policy = kLifetimeBased; // for levels <= min_boundary
   MappingPolicyType upper_level_policy_fallback = kLifetimeBased;
 
-  MappingPolicyType lower_level_policy = kSameLevelNearbyKeys; // for levels >= max_boundary
-  MappingPolicyType lower_level_policy_fallback = kSameLevelNearbyKeys;
+  MappingPolicyType lower_level_policy = kLifetimeBased; // for levels >= max_boundary
+  MappingPolicyType lower_level_policy_fallback = kLifetimeBased;
 
-  MappingPolicyType middle_level_policy = kCAZA; // for all other levels
-  MappingPolicyType middle_level_policy_fallback = kCAZA;
+  MappingPolicyType middle_level_policy = kLifetimeBased; // for all other levels
+  MappingPolicyType middle_level_policy_fallback = kLifetimeBased;
   // MappingPolicyType fallback_policy = kLifetimeBased; // When a specific policy can't be applied
 
   uint64_t gc_start_level = 20; // GC kicks in when free space is lower than this percentage
@@ -99,7 +99,7 @@ struct ZenfsParamContainer {
         lower_level_policy = mapping_policy_map[value];
       
       else if(type == "lower_level_policy_fallback" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        lower_level_policy = mapping_policy_map[value];
+        lower_level_policy_fallback = mapping_policy_map[value];
 
       else if(type == "middle_level_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
         middle_level_policy = mapping_policy_map[value];
