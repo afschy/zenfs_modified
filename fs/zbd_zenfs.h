@@ -173,6 +173,8 @@ class ZonedBlockDevice {
   // bookkeeping
   std::atomic<uint64_t> bytes_written_{0};
   std::atomic<uint64_t> gc_bytes_written_{0};
+  uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
+  uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
 
   std::atomic<long> active_io_zones_;
   std::atomic<long> open_io_zones_;
@@ -203,6 +205,7 @@ class ZonedBlockDevice {
  public:
   // Stores all new parameters for the platform, loaded from param_loader.h
   ZenfsParamContainer zenfs_parameters_;
+  FILE* logfile_;  // for minimal logs, mostly for the garbage collector
 
   // mutex to be acquired when accessing/modifying levelwise_file_list_
   std::mutex levelwise_files_mtx_;
@@ -256,10 +259,10 @@ class ZonedBlockDevice {
   int Read(char *buf, uint64_t offset, int n, bool direct);
   IOStatus InvalidateCache(uint64_t pos, uint64_t size);
 
-  IOStatus ReleaseMigrateZone(Zone *zone);
+  IOStatus ReleaseMigrateZone(Zone *zone, bool alloc_new=false);
 
   IOStatus TakeMigrateZone(Zone **out_zone, ZoneFile* zonefile,
-                           Env::WriteLifeTimeHint lifetime, uint32_t min_capacity);
+                           Env::WriteLifeTimeHint lifetime, uint32_t min_capacity, bool* alloc_new);
 
   void AddBytesWritten(uint64_t written) { bytes_written_ += written; };
   void AddGCBytesWritten(uint64_t written) { gc_bytes_written_ += written; };
@@ -267,6 +270,7 @@ class ZonedBlockDevice {
     return bytes_written_.load() - gc_bytes_written_.load();
   };
   uint64_t GetTotalBytesWritten() { return bytes_written_.load(); };
+  uint64_t GetGCBytesWritten() { return gc_bytes_written_.load(); };
 
   // Adds a new file to the appropriate level and position of levelwise_file_list_
   // Called after the whole file is written
@@ -276,6 +280,11 @@ class ZonedBlockDevice {
   void RemoveZoneFileRecord(ZoneFile* zonefile_ptr);
   // Re-computes the compensated file sizes for all recorded files
   void RecomputeCompensatedFileSizes();
+
+  uint64_t GetEmptyZoneCount();
+  uint64_t GetAllocCount() { return alloc_count_; }
+  uint64_t GetFailureCount() { return failure_count_; }
+  uint64_t GetFreePercent();
 
  private:
   IOStatus GetZoneDeferredStatus();
@@ -495,6 +504,7 @@ class ZoneFile {
   bool is_recorded_ = false;
 
   uint64_t rank_ = 100000;
+  uint64_t alloc_size_ = 0; // used for non-fragmented zone allocation
 
   static const int SPARSE_HEADER_SIZE = 8;
 

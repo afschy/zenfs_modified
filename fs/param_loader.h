@@ -25,6 +25,11 @@ enum MappingPolicyType {  // In which zone to put a newly created file
   kCompensatedSize, // Rank based mapping based on file sizes adjusted for tombstones
 };
 
+enum GCType {
+  kDefaultGC,
+  kImprovedGC,
+};
+
 struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kDefault;
 
@@ -32,30 +37,37 @@ struct ZenfsParamContainer {
   
   uint8_t max_level = 1;
   std::mutex lock_max_level;
-  uint8_t min_boundary = 1; // levels <= this will follow a special policy
-  uint8_t max_boundary = 4; // levels >= this will follow a special policy
+  uint8_t min_boundary = 2; // levels <= this will follow a special policy
+  uint8_t max_boundary = 6; // levels >= this will follow a special policy
 
   double tombstone_density = 0.5;
 
-  MappingPolicyType upper_level_policy = kLifetimeBased; // for levels <= min_boundary
-  MappingPolicyType upper_level_policy_fallback = kLifetimeBased;
+  MappingPolicyType upper_level_policy = kClusterTogether; // for levels <= min_boundary
+  MappingPolicyType upper_level_policy_fallback = kClusterTogether;
 
-  MappingPolicyType lower_level_policy = kLifetimeBased; // for levels >= max_boundary
-  MappingPolicyType lower_level_policy_fallback = kLifetimeBased;
+  MappingPolicyType lower_level_policy = kClusterTogether; // for levels >= max_boundary
+  MappingPolicyType lower_level_policy_fallback = kClusterTogether;
 
-  MappingPolicyType middle_level_policy = kLifetimeBased; // for all other levels
-  MappingPolicyType middle_level_policy_fallback = kLifetimeBased;
+  MappingPolicyType middle_level_policy = kClusterTogether; // for all other levels
+  MappingPolicyType middle_level_policy_fallback = kClusterTogether;
   // MappingPolicyType fallback_policy = kLifetimeBased; // When a specific policy can't be applied
 
+  uint8_t fragmentation_enabled = 1;  // Let a file be spread across multiple zones
+
+  GCType gc_type = kDefaultGC;
   uint64_t gc_start_level = 20; // GC kicks in when free space is lower than this percentage
   //TODO: gc trigger based on invalid amount of data per zone and/or capacity percentage per zone
   //can mix the two potentially
+  uint64_t gc_stop_level = 25;  // Stop GC when this level is reached
   uint64_t gc_slope = 3; // GC aggresiveness
   uint64_t gc_pause_seconds = 10; // The interval in seconds between GC activations
   uint8_t cold_migration = 0; // Move long-lived files from low-wear to high-wear zones
+  uint64_t reserve_zone_count = 10;  // Keep some zone off-limits unless absolutely necessary
 
-  uint32_t buffer_size_megabytes = 65;
+  uint32_t buffer_size_megabytes = 2;
   uint32_t buffer_count_max = 20;
+
+  std::string logname = "unizns_default.log";
 
   void LoadParamsFromFile() {
     static std::unordered_map<std::string, EmptyZoneAllocType>
@@ -80,13 +92,25 @@ struct ZenfsParamContainer {
         {"kOverlapGrandchildren", kOverlapGrandchildren},
         {"kCompensatedSize", kCompensatedSize},
       };
+    
+    static std::unordered_map<std::string, GCType>
+      gc_type_map = {
+        {"kDefaultGC", kDefaultGC},
+        {"kImprovedGC", kImprovedGC},
+      };
 
-    std::ifstream infile("../params.txt");
+    std::ifstream infile("/home/afschy/RocksDB-Wrapper/lib/rocksdb/plugin/zenfs/params.txt");
     std::string type, value;
 
     while(infile >> type >> value) {
 
-      if(type == "empty_zone_allocator" && empty_zone_allocator_map.find(value) != empty_zone_allocator_map.end())
+      if(type == "logname")
+        logname = value;
+
+      else if(type == "gc_type" && gc_type_map.find(value) != gc_type_map.end())
+        gc_type = gc_type_map[value];
+
+      else if(type == "empty_zone_allocator" && empty_zone_allocator_map.find(value) != empty_zone_allocator_map.end())
         empty_zone_allocator = empty_zone_allocator_map[value];
       
       else if(type == "upper_level_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
@@ -128,10 +152,22 @@ struct ZenfsParamContainer {
           gc_start_level = value_int;
       }
 
+      else if(type == "gc_stop_level") {
+        int value_int = std::stoi(value);
+        if(value_int > 0 && value_int < 100)
+          gc_stop_level = value_int;
+      }
+
       else if(type == "gc_slope") {
         int value_int = std::stoi(value);
         if(value_int > 0 && value_int < 100)
           gc_slope = value_int;
+      }
+
+      else if(type == "reserve_zone_count") {
+        int value_int = std::stoi(value);
+        if(value_int >= 0 && value_int < 100)
+          reserve_zone_count = value_int;
       }
 
       else if(type == "min_boundary") {
@@ -144,6 +180,11 @@ struct ZenfsParamContainer {
         int value_int = std::stoi(value);
         if(value_int >= 0 && value_int < 100)
           max_boundary = value_int;
+      }
+
+      else if(type == "fragmentation_enabled") {
+        uint64_t value_int = std::stoul(value);
+        fragmentation_enabled = value_int;
       }
 
       else if(type == "gc_pause_seconds") {
@@ -172,6 +213,16 @@ struct ZenfsParamContainer {
 
     if(max_boundary <= min_boundary)
       max_boundary = min_boundary + 1;
+
+    fprintf(stdout, "UniZNS parameter initialization complete\n");
+    fprintf(stdout, "Log file name = %s\n", logname.c_str());
+    fprintf(stdout, "gc_type = %d\n", gc_type);
+    fprintf(stdout, "upper_level_policy = %d\n", upper_level_policy);
+    fprintf(stdout, "middle_level_policy = %d\n", middle_level_policy);
+    fprintf(stdout, "lower_level_policy = %d\n", lower_level_policy);
+    fprintf(stdout, "GC start level = %lu\n", gc_start_level);
+    fprintf(stdout, "GC stop level = %lu\n", gc_stop_level);
+    fprintf(stdout, "fragmentation = %u\n", fragmentation_enabled);
   }
 };
 

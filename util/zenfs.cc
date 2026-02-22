@@ -47,7 +47,7 @@ DEFINE_string(restore_path, "", "Path to restore files");
 DEFINE_string(backup_path, "", "Path to backup files");
 DEFINE_string(src_file, "", "Source file path");
 DEFINE_string(dest_file, "", "Destination file path");
-DEFINE_bool(enable_gc, false, "Enable garbage collection");
+DEFINE_bool(enable_gc, true, "Enable garbage collection");
 
 namespace ROCKSDB_NAMESPACE {
 

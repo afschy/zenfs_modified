@@ -183,6 +183,8 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
     Info(logger_, "New zonefs backing: %s", zbd_be_->GetFilename().c_str());
   }
   zenfs_parameters_.LoadParamsFromFile();
+  logfile_ = fopen(zenfs_parameters_.logname.c_str(), "w");
+  fprintf(logfile_, "Created ZBD\n");
 }
 
 IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
@@ -297,6 +299,13 @@ uint64_t ZonedBlockDevice::GetReclaimableSpace() {
   return reclaimable;
 }
 
+uint64_t ZonedBlockDevice::GetFreePercent() {
+  uint64_t non_free = GetUsedSpace() + GetReclaimableSpace();
+  uint64_t free = GetFreeSpace();
+  uint64_t free_percent = (100 * free) / (free + non_free);
+  return free_percent;
+}
+
 void ZonedBlockDevice::LogZoneStats() {
   uint64_t used_capacity = 0;
   uint64_t reclaimable_capacity = 0;
@@ -330,7 +339,7 @@ void ZonedBlockDevice::LogZoneUsage() {
     int64_t used = z->used_capacity_;
 
     if (used > 0) {
-      Debug(logger_, "Zone 0x%lX used capacity: %ld bytes (%ld MB)\n",
+      Info(logger_, "Zone 0x%lX used capacity: %ld bytes (%ld MB)\n",
             z->start_, used, used / MB);
     }
   }
@@ -390,6 +399,9 @@ ZonedBlockDevice::~ZonedBlockDevice() {
   for (const auto z : io_zones) {
     delete z;
   }
+  fprintf(logfile_, "Data written = %0.4lf MB, GC movement = %0.4lf MB\n",
+          1.00*bytes_written_/(1<<20), 1.00*gc_bytes_written_/(1<<20));
+  fclose(logfile_);
 }
 
 IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
@@ -616,6 +628,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
 
   IOStatus s;
   Zone* old_zone = *zone_out;
+  alloc_count_++;
   
   s = (this->*primary_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
   if(*zone_out != old_zone) // found a zone
@@ -632,6 +645,8 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
 
   s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
   *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  // fprintf(logfile_, "Policy failure\n");
+  failure_count_++;
   return s;
 }
 
@@ -689,7 +704,7 @@ int ZonedBlockDevice::Read(char *buf, uint64_t offset, int n, bool direct) {
   return ret;
 }
 
-IOStatus ZonedBlockDevice::ReleaseMigrateZone(Zone *zone) {
+IOStatus ZonedBlockDevice::ReleaseMigrateZone(Zone *zone, bool alloc_new) {
   IOStatus s = IOStatus::OK();
   {
     std::unique_lock<std::mutex> lock(migrate_zone_mtx_);
@@ -699,6 +714,8 @@ IOStatus ZonedBlockDevice::ReleaseMigrateZone(Zone *zone) {
       Info(logger_, "ReleaseMigrateZone: %lu", zone->start_);
     }
   }
+  // if(alloc_new)
+  //   PutActiveIOZoneToken();
   migrate_resource_.notify_one();
   return s;
 }
@@ -706,17 +723,23 @@ IOStatus ZonedBlockDevice::ReleaseMigrateZone(Zone *zone) {
 IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
                                            ZoneFile* zonefile,
                                            Env::WriteLifeTimeHint file_lifetime,
-                                           uint32_t min_capacity) {
+                                           uint32_t min_capacity,
+                                           bool* alloc_new) {
   std::unique_lock<std::mutex> lock(migrate_zone_mtx_);
   migrate_resource_.wait(lock, [this] { return !migrating_; });
 
   migrating_ = true;
+  *alloc_new = false;
 
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
   auto s =
       GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, out_zone, min_capacity);
   if (s.ok() && (*out_zone) != nullptr) {
     Info(logger_, "TakeMigrateZone: %lu", (*out_zone)->start_);
+  } else if (GetEmptyZoneCount() > 0 && GetActiveIOZoneTokenIfAvailable()) {
+    AllocateEmptyZone(out_zone, zonefile->level_);
+    *alloc_new = true;
+    Info(logger_, "New Migrate Zone: %lu", (*out_zone)->start_);
   } else {
     migrating_ = false;
   }
@@ -768,7 +791,10 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
   WaitForOpenIOZoneToken(io_type == IOType::kWAL);
 
   /* Try to fill an already open zone(with the best life time diff) */
-  s = GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, &allocated_zone);
+  if (zenfs_parameters_.fragmentation_enabled)
+    s = GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, &allocated_zone);
+  else
+    s = GetBestOpenZoneMatch(zonefile, file_lifetime, &best_diff, &allocated_zone, zonefile->alloc_size_);
   if (!s.ok()) {
     PutOpenIOZoneToken();
     return s;
@@ -785,10 +811,10 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
      */
     if (allocated_zone != nullptr) {
       if (!got_token && best_diff == LIFETIME_DIFF_COULD_BE_WORSE) {
-        Debug(logger_,
+        Info(logger_,
               "Allocator: avoided a finish by relaxing lifetime diff "
               "requirement\n");
-      } else {
+      } else if(GetEmptyZoneCount() > zenfs_parameters_.reserve_zone_count) {
         s = allocated_zone->CheckRelease();
         if (!s.ok()) {
           PutOpenIOZoneToken();
@@ -796,6 +822,8 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
           return s;
         }
         allocated_zone = nullptr;
+      } else if(got_token) {
+        PutActiveIOZoneToken();
       }
     }
 
@@ -831,7 +859,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
 
   if (allocated_zone) {
     assert(allocated_zone->IsBusy());
-    Debug(logger_,
+    Info(logger_,
           "Allocating zone(new=%d) start: 0x%lx wp: 0x%lx lt: %d file lt: %d\n",
           new_zone, allocated_zone->start_, allocated_zone->wp_,
           allocated_zone->lifetime_, file_lifetime);

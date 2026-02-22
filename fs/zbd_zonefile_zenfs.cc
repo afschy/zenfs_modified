@@ -528,6 +528,7 @@ IOStatus ZoneFile::BufferedAppend(char* buffer, uint32_t data_size) {
   uint32_t wr_size;
   uint32_t block_sz = GetBlockSize();
   IOStatus s;
+  alloc_size_ = data_size;
 
   if (active_zone_ == NULL) {
     s = AllocateNewZone();
@@ -568,6 +569,7 @@ IOStatus ZoneFile::BufferedAppend(char* buffer, uint32_t data_size) {
       if (left) {
         memmove((void*)(buffer), (void*)(buffer + wr_size), left);
       }
+      alloc_size_ = left;
       s = AllocateNewZone();
       if (!s.ok()) return s;
     }
@@ -583,6 +585,7 @@ IOStatus ZoneFile::SparseAppend(char* sparse_buffer, uint32_t data_size) {
   uint32_t wr_size;
   uint32_t block_sz = GetBlockSize();
   IOStatus s;
+  alloc_size_ = data_size;
 
   if (active_zone_ == NULL) {
     s = AllocateNewZone();
@@ -627,6 +630,7 @@ IOStatus ZoneFile::SparseAppend(char* sparse_buffer, uint32_t data_size) {
         memmove((void*)(sparse_buffer + ZoneFile::SPARSE_HEADER_SIZE),
                 (void*)(sparse_buffer + wr_size), left);
       }
+      alloc_size_ = left;
       s = AllocateNewZone();
       if (!s.ok()) return s;
     }
@@ -640,6 +644,7 @@ IOStatus ZoneFile::Append(void* data, int data_size) {
   uint32_t left = data_size;
   uint32_t wr_size, offset = 0;
   IOStatus s = IOStatus::OK();
+  alloc_size_ = data_size;
 
   if (!active_zone_) {
     s = AllocateNewZone();
@@ -655,6 +660,7 @@ IOStatus ZoneFile::Append(void* data, int data_size) {
         return s;
       }
 
+      alloc_size_ = left;
       s = AllocateNewZone();
       if (!s.ok()) return s;
     }

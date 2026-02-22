@@ -29,7 +29,7 @@
 #include "util/coding.h"
 #include "util/crc32c.h"
 
-#define DEFAULT_ZENV_LOG_PATH "/tmp/"
+#define DEFAULT_ZENV_LOG_PATH "/home/afschy/RocksDB-Wrapper/"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -267,122 +267,6 @@ ZenFS::~ZenFS() {
   meta_log_.reset(nullptr);
   ClearFiles();
   delete zbd_;
-}
-
-void ZenFS::GCWorker() {
-  ZenfsParamContainer container;
-  container.LoadParamsFromFile();
-  GC_START_LEVEL = container.gc_start_level;
-  GC_SLOPE = container.gc_slope;
-  GC_PAUSE_SECONDS = container.gc_pause_seconds;
-
-  while (run_gc_worker_) {
-    usleep(1000 * 1000 * GC_PAUSE_SECONDS);
-
-    uint64_t non_free = zbd_->GetUsedSpace() + zbd_->GetReclaimableSpace();
-    uint64_t free = zbd_->GetFreeSpace();
-    uint64_t free_percent = (100 * free) / (free + non_free);
-    ZenFSSnapshot snapshot;
-    ZenFSSnapshotOptions options;
-
-    if (free_percent > GC_START_LEVEL) continue;
-
-    options.zone_ = 1;
-    options.zone_file_ = 1;
-    options.log_garbage_ = 1;
-
-    GetZenFSSnapshot(snapshot, options);
-
-    uint64_t threshold = (100 - GC_SLOPE * (GC_START_LEVEL - free_percent));
-    std::set<uint64_t> migrate_zones_start;
-    for (const auto& zone : snapshot.zones_) {
-      if (zone.capacity == 0) {
-        uint64_t garbage_percent_approx =
-            100 - 100 * zone.used_capacity / zone.max_capacity;
-        if (garbage_percent_approx > threshold &&
-            garbage_percent_approx < 100) {
-          migrate_zones_start.emplace(zone.start);
-        }
-      }
-    }
-
-    std::vector<ZoneExtentSnapshot*> migrate_exts;
-    for (auto& ext : snapshot.extents_) {
-      if (migrate_zones_start.find(ext.zone_start) !=
-          migrate_zones_start.end()) {
-        migrate_exts.push_back(&ext);
-      }
-    }
-
-    if (migrate_exts.size() > 0) {
-      IOStatus s;
-      Info(logger_, "Garbage collecting %d extents \n",
-           (int)migrate_exts.size());
-      s = MigrateExtents(migrate_exts);
-      if (!s.ok()) {
-        Error(logger_, "Garbage collection failed");
-      }
-    }
-
-    if(!container.cold_migration) continue;
-    // <zone_start, level_sum>, needed to calculate average level of a file
-    std::unordered_map<uint64_t, double> level_map;
-    // <zone_start, total_size>, needed to calculate average level of a file
-    std::unordered_map<uint64_t, uint64_t> size_map;
-
-    for (auto& ext : snapshot.extents_) {
-      if(ext.level < 0 || ext.length <= 0) continue;
-      if(level_map.find(ext.zone_start) == level_map.end()) {
-        level_map[ext.zone_start] = 0;
-        size_map[ext.zone_start] = 0;
-      }
-      level_map[ext.zone_start] += ext.level * ext.length;
-      size_map[ext.zone_start] += ext.length;
-    }
-    for (const auto& it : level_map)
-      level_map[it.first] = level_map[it.first] / size_map[it.first];
-
-    std::vector<ZoneSnapshot> sorted_snapshots = snapshot.zones_;
-    std::sort(sorted_snapshots.begin(), sorted_snapshots.end(), [](const ZoneSnapshot& a, const ZoneSnapshot& b) {
-      return a.reset_count < b.reset_count;
-    });
-    double interval = 1.00 * sorted_snapshots.size() / zbd_->zenfs_parameters_.max_level;
-
-    int max_diff = 0;
-    int zone_start_max_diff = -1;
-
-    for(unsigned int i=0; i<sorted_snapshots.size(); i++) {
-      if(size_map.find(sorted_snapshots[i].start) == size_map.end())
-        continue;
-      int ideal_bin = 1.00 * i / interval;
-      int real_bin = level_map[sorted_snapshots[i].start];
-      int diff = real_bin - ideal_bin;
-      
-      if(diff <= max_diff) continue;
-
-      max_diff = diff;
-      zone_start_max_diff = sorted_snapshots[i].start;
-    }
-
-    if(zone_start_max_diff < 3) continue;
-
-    migrate_exts.clear();
-    for (auto& ext : snapshot.extents_) {
-      if (zone_start_max_diff >= 0 && ext.zone_start == (unsigned)zone_start_max_diff) {
-        migrate_exts.push_back(&ext);
-      }
-    }
-
-    if (migrate_exts.size() > 0) {
-      IOStatus s;
-      Info(logger_, "Migrating %d extents of cold files\n",
-           (int)migrate_exts.size());
-      s = MigrateExtents(migrate_exts);
-      if (!s.ok()) {
-        Error(logger_, "Garbage collection failed");
-      }
-    }
-  }
 }
 
 IOStatus ZenFS::Repair() {
@@ -1643,7 +1527,6 @@ std::map<std::string, Env::WriteLifeTimeHint> ZenFS::GetWriteLifeTimeHints() {
   return hint_map;
 }
 
-#if !defined(NDEBUG) || defined(WITH_TERARKDB)
 static std::string GetLogFilename(std::string bdev) {
   std::ostringstream ss;
   time_t t = time(0);
@@ -1655,7 +1538,6 @@ static std::string GetLogFilename(std::string bdev) {
 
   return ss.str();
 }
-#endif
 
 Status NewZenFS(FileSystem** fs, const std::string& bdevname,
                 std::shared_ptr<ZenFSMetrics> metrics) {
@@ -1668,22 +1550,14 @@ Status NewZenFS(FileSystem** fs, const ZbdBackendType backend_type,
   std::shared_ptr<Logger> logger;
   Status s;
 
-  // TerarkDB needs to log important information in production while ZenFS
-  // doesn't (currently).
-  //
-  // TODO(guokuankuan@bytedance.com) We need to figure out how to reuse
-  // RocksDB's logger in the future.
-#if !defined(NDEBUG) || defined(WITH_TERARKDB)
+  fprintf(stdout, "Creating new log file at %s\n", GetLogFilename(backend_name).c_str());
   s = Env::Default()->NewLogger(GetLogFilename(backend_name), &logger);
+  // s = Env::Default()->NewLogger("zenfs_" + zbd->zenfs_parameters_.logname, &logger);
   if (!s.ok()) {
     fprintf(stderr, "ZenFS: Could not create logger");
   } else {
-    logger->SetInfoLogLevel(DEBUG_LEVEL);
-#ifdef WITH_TERARKDB
     logger->SetInfoLogLevel(INFO_LEVEL);
-#endif
   }
-#endif
 
   ZonedBlockDevice* zbd =
       new ZonedBlockDevice(backend_name, backend_type, logger, metrics);
@@ -1817,119 +1691,6 @@ void ZenFS::GetZenFSSnapshot(ZenFSSnapshot& snapshot,
   if (options.log_garbage_) {
     zbd_->LogGarbageInfo();
   }
-}
-
-IOStatus ZenFS::MigrateExtents(
-    const std::vector<ZoneExtentSnapshot*>& extents) {
-  IOStatus s;
-  // Group extents by their filename
-  std::map<std::string, std::vector<ZoneExtentSnapshot*>> file_extents;
-  for (auto* ext : extents) {
-    std::string fname = ext->filename;
-    // We only migrate SST file extents
-    if (ends_with(fname, ".sst")) {
-      file_extents[fname].emplace_back(ext);
-    }
-  }
-
-  for (const auto& it : file_extents) {
-    s = MigrateFileExtents(it.first, it.second);
-    if (!s.ok()) break;
-    s = zbd_->ResetUnusedIOZones();
-    if (!s.ok()) break;
-  }
-  return s;
-}
-
-IOStatus ZenFS::MigrateFileExtents(
-    const std::string& fname,
-    const std::vector<ZoneExtentSnapshot*>& migrate_exts) {
-  IOStatus s = IOStatus::OK();
-  Info(logger_, "MigrateFileExtents, fname: %s, extent count: %lu",
-       fname.data(), migrate_exts.size());
-
-  // The file may be deleted by other threads, better double check.
-  auto zfile = GetFile(fname);
-  if (zfile == nullptr) {
-    return IOStatus::OK();
-  }
-
-  // Don't migrate open for write files and prevent write reopens while we
-  // migrate
-  if (!zfile->TryAcquireWRLock()) {
-    return IOStatus::OK();
-  }
-
-  std::vector<ZoneExtent*> new_extent_list;
-  std::vector<ZoneExtent*> extents = zfile->GetExtents();
-  for (const auto* ext : extents) {
-    new_extent_list.push_back(
-        new ZoneExtent(ext->start_, ext->length_, ext->zone_, zfile->level_));
-  }
-
-  // Modify the new extent list
-  for (ZoneExtent* ext : new_extent_list) {
-    // Check if current extent need to be migrated
-    auto it = std::find_if(migrate_exts.begin(), migrate_exts.end(),
-                           [&](const ZoneExtentSnapshot* ext_snapshot) {
-                             return ext_snapshot->start == ext->start_ &&
-                                    ext_snapshot->length == ext->length_;
-                           });
-
-    if (it == migrate_exts.end()) {
-      Info(logger_, "Migrate extent not found, ext_start: %lu", ext->start_);
-      continue;
-    }
-
-    Zone* target_zone = nullptr;
-
-    // Allocate a new migration zone.
-    s = zbd_->TakeMigrateZone(&target_zone, zfile.get(), zfile->GetWriteLifeTimeHint(),
-                              ext->length_);
-    if (!s.ok()) {
-      continue;
-    }
-
-    if (target_zone == nullptr) {
-      zbd_->ReleaseMigrateZone(target_zone);
-      Info(logger_, "Migrate Zone Acquire Failed, Ignore Task.");
-      continue;
-    }
-
-    uint64_t target_start = target_zone->wp_;
-    if (zfile->IsSparse()) {
-      // For buffered write, ZenFS use inlined metadata for extents and each
-      // extent has a SPARSE_HEADER_SIZE.
-      target_start = target_zone->wp_ + ZoneFile::SPARSE_HEADER_SIZE;
-      zfile->MigrateData(ext->start_ - ZoneFile::SPARSE_HEADER_SIZE,
-                         ext->length_ + ZoneFile::SPARSE_HEADER_SIZE,
-                         target_zone);
-      zbd_->AddGCBytesWritten(ext->length_ + ZoneFile::SPARSE_HEADER_SIZE);
-    } else {
-      zfile->MigrateData(ext->start_, ext->length_, target_zone);
-      zbd_->AddGCBytesWritten(ext->length_);
-    }
-
-    // If the file doesn't exist, skip
-    if (GetFileNoLock(fname) == nullptr) {
-      Info(logger_, "Migrate file not exist anymore.");
-      zbd_->ReleaseMigrateZone(target_zone);
-      break;
-    }
-
-    ext->start_ = target_start;
-    ext->zone_ = target_zone;
-    ext->zone_->used_capacity_ += ext->length_;
-
-    zbd_->ReleaseMigrateZone(target_zone);
-  }
-
-  SyncFileExtents(zfile.get(), new_extent_list);
-  zfile->ReleaseWRLock();
-
-  Info(logger_, "MigrateFileExtents Finished, fname: %s, extent count: %lu",
-       fname.data(), migrate_exts.size());
-  return IOStatus::OK();
 }
 
 extern "C" FactoryFunc<FileSystem> zenfs_filesystem_reg;

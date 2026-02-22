@@ -1,0 +1,13 @@
+logname hybrid_3.log
+gc_start_level 20
+gc_stop_level 30
+gc_type kImprovedGC
+reserve_zone_count 10
+buffer_size_megabytes 2
+fragmentation_enabled 1
+upper_level_policy kCAZA
+upper_level_policy_fallback kCAZA
+lower_level_policy kSameLevelNearbyKeys
+lower_level_policy_fallback kSameLevelNearbyKeys
+middle_level_policy kSameLevelNearbyKeys
+middle_level_policy_fallback kSameLevelNearbyKeys

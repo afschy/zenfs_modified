@@ -1,6 +1,7 @@
 
 zenfs_SOURCES-y = \
 	fs/fs_zenfs.cc \
+	fs/fs_gc_zenfs.cc \
 	fs/zbd_zenfs.cc \
 	fs/zbd_zonefile_zenfs.cc \
 	fs/zbd_extension_zenfs.cc \

@@ -62,7 +62,7 @@ class Superblock {
   /* Create a superblock for a filesystem covering the entire zoned block device
    */
   Superblock(ZonedBlockDevice* zbd, std::string aux_fs_path = "",
-             uint32_t finish_threshold = 0, bool enable_gc = false) {
+             uint32_t finish_threshold = 0, bool enable_gc = true) {
     std::string uuid = Env::Default()->GenerateUniqueId();
     int uuid_len =
         std::min(uuid.length(),
@@ -471,7 +471,14 @@ class ZenFS : public FileSystemWrapper {
       20;                      /* Enable GC when < 20% free space available */
   uint64_t GC_SLOPE = 3; /* GC agressiveness */
   uint64_t GC_PAUSE_SECONDS = 10;
+
+  // uint64_t GC_START_EMPTY_ZONE = 10;
+  // uint64_t GC_STOP_EMPTY_ZONE = 20;
+
   void GCWorker();
+  void MigrateColdFiles();
+  uint32_t SelectGarbageZonesDefault(ZenFSSnapshot& snapshot, uint64_t free_percent, std::set<uint64_t>& migrate_zones_start);
+  uint32_t SelectGarbageZonesImproved(ZenFSSnapshot& snapshot, uint64_t free_percent, std::set<uint64_t>& migrate_zones_start);
 };
 // #endif  // !defined(ROCKSDB_LITE) && defined(OS_LINUX)
 

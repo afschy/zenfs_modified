@@ -36,6 +36,14 @@
 #include "zonefs_zenfs.h"
 namespace ROCKSDB_NAMESPACE {
 
+uint64_t ZonedBlockDevice::GetEmptyZoneCount() {
+  uint64_t counter = 0;
+  for (const auto z : io_zones)
+    if (z->IsEmpty())
+      counter++;
+  return counter;
+}
+
 IOStatus ZonedBlockDevice::AllocateEmptyZoneDefault(Zone **zone_out) {
   IOStatus s;
   Zone *allocated_zone = nullptr;

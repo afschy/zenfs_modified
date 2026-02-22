@@ -53,6 +53,8 @@ class ZoneSnapshot {
   uint32_t reset_count;
   uint32_t finish_count;
 
+  uint32_t garbage_percent;
+
  public:
   ZoneSnapshot(const Zone& zone)
       : start(zone.start_),
@@ -61,7 +63,10 @@ class ZoneSnapshot {
         used_capacity(zone.used_capacity_),
         max_capacity(zone.max_capacity_),
         reset_count(zone.reset_count_),
-        finish_count(zone.finish_count_) {}
+        finish_count(zone.finish_count_) {
+    
+    garbage_percent = 100 - 100 * used_capacity / max_capacity;
+  }
 };
 
 class ZoneExtentSnapshot {
