@@ -361,6 +361,11 @@ class ZonedBlockDevice {
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
   
+  IOStatus MatchOAZA(ZoneFile* zonefile,
+                      Env::WriteLifeTimeHint file_lifetime,
+                      unsigned int *best_diff_out, Zone **zone_out,
+                      uint32_t min_capacity = 0);
+  
   // Related to the allocation of a new empty zone when needed
   // Only relevant when static zone-to-block mapping is used in the underlying ZNS SSD
   IOStatus AllocateEmptyZone(Zone **zone_out, int level=-1);
@@ -502,6 +507,8 @@ class ZoneFile {
   
   bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
   bool is_recorded_ = false;
+  uint64_t key_update_count_ = 0;
+  uint64_t key_update_post_alloc_count_ = 0;
 
   uint64_t rank_ = 100000;
   uint64_t alloc_size_ = 0; // used for non-fragmented zone allocation

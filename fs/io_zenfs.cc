@@ -43,7 +43,7 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
 
   buffer_size_megabytes = zoneFile->GetZbd()->zenfs_parameters_.buffer_size_megabytes;
   if(max_buffer_count == INT32_MAX)
-    zoneFile->GetZbd()->zenfs_parameters_.buffer_size_megabytes;
+    max_buffer_count = zoneFile->GetZbd()->zenfs_parameters_.buffer_count_max;
 
   if (buffered) {
     // if maximum buffer capacity is reached, wait for a buffer to be de-allocated

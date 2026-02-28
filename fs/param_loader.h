@@ -15,14 +15,15 @@ enum EmptyZoneAllocType { // When an empty zone is needed, how is it chosen from
 enum MappingPolicyType {  // In which zone to put a newly created file
   kLifetimeBased, // ZenFS default, no change
   kCAZA, // Files are put in the same zones as other files in neighboring level with overlapping keyranges
-  kSameLevelNearbyKeys, // ZoneKV
-  kArrivalTimeBased, // Files are put in order of arrival, greedily filling up available zones
+  kSameLevelNearbyKeys, // Nearest
+  kArrivalTimeBased, // Files are put in order of arrival, greedily filling up available zones, ZoneKV
   kTombstoneDensity, // Files having tombstone densities higher than a threshold go to a dedicated zone
   kTombstoneTTL, // Files having similar TTL should go to the same zones
-  kClusterTogether, // Try to put everything in the same zone
-  kOverlapChildren, // Rank based mapping based on overlap with level-i+1
+  kClusterTogether, // Try to put everything in the same zone, full naive
+  kOverlapChildren, // Rank based mapping based on overlap with level-i+1, expanded version
   kOverlapGrandchildren, // Rank based mapping based on overlap with level-i+2
   kCompensatedSize, // Rank based mapping based on file sizes adjusted for tombstones
+  kOAZA, // Rank based mapping based on overlap with level-i+1
 };
 
 enum GCType {
@@ -32,8 +33,9 @@ enum GCType {
 
 struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kDefault;
+  uint8_t real_caza = 1;
 
-  uint64_t average_value_size = 0;
+  uint64_t average_value_size = 48;
   
   uint8_t max_level = 1;
   std::mutex lock_max_level;
@@ -91,6 +93,7 @@ struct ZenfsParamContainer {
         {"kOverlapChildren", kOverlapChildren},
         {"kOverlapGrandchildren", kOverlapGrandchildren},
         {"kCompensatedSize", kCompensatedSize},
+        {"kOAZA", kOAZA},
       };
     
     static std::unordered_map<std::string, GCType>

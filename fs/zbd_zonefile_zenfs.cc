@@ -280,6 +280,8 @@ uint64_t ZoneFile::GetFileSize() { return file_size_; }
 uint64_t ZoneFile::GetFileSizeMeta() {
   if(file_size_meta_ == 0)
     file_size_meta_ = file_size_;
+  if(file_size_meta_ == 0)
+    file_size_meta_ = alloc_size_;
   return file_size_meta_;
 }
 void ZoneFile::SetFileSize(uint64_t sz) { file_size_ = sz; }
@@ -337,6 +339,10 @@ bool ZoneFile::IsOpenForWR() { return open_for_wr_; }
 
 IOStatus ZoneFile::CloseWR() {
   CreateOrUpdateRecord();
+  // fprintf(zbd_->logfile_, "SmallestKey: %s\n", smallest_.const_rep()->c_str());
+  // fprintf(zbd_->logfile_, "LargesttKey: %s\n", largest_.const_rep()->c_str());
+  // fprintf(zbd_->logfile_, "Update count = %lu, After alloc = %lu\n", key_update_count_, key_update_post_alloc_count_);
+  // fflush(zbd_->logfile_);
 
   IOStatus s;
   /* Mark up the file as being closed */
@@ -829,6 +835,10 @@ void ZoneFile::UpdateInternalKeys(const Slice& key, SequenceNumber seqno) {
 
   smallest_seqno_ = std::min(smallest_seqno_, seqno);
   largest_seqno_ = std::max(largest_seqno_, seqno);
+
+  key_update_count_++;
+  if(active_zone_ != NULL)
+    key_update_post_alloc_count_++;
 }
 
 void ZoneFile::UpdateInternalKeysRange(const Slice& start, const Slice& end, SequenceNumber seqno, const CompareInterface* icmp) {
@@ -894,6 +904,8 @@ void ZoneFile::ComputeCompensatedSize() {
   uint64_t average_value_size = zbd_->zenfs_parameters_.average_value_size;
   if(file_size_meta_ == 0)
     file_size_meta_ = file_size_;
+  if(file_size_meta_ == 0)
+    file_size_meta_ = alloc_size_;
   compensated_file_size_ = file_size_meta_;
   
   if ((num_deletions_ - num_range_deletions_) * 2 >= num_entries_) {

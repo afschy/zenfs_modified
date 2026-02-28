@@ -593,8 +593,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   
   // function pointer type that can hold any instance of a Match.* function
   typedef IOStatus (ZonedBlockDevice::*MatchFunctionType)(ZoneFile* zonefile, Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out, Zone **zone_out, uint32_t min_capacity);
-  static std::unordered_map<MappingPolicyType, MatchFunctionType> function_map;
-
+  static std::unordered_map<MappingPolicyType, MatchFunctionType>
   function_map = {
     {kLifetimeBased, &ZonedBlockDevice::MatchLifetimeBased},
     {kCAZA, &ZonedBlockDevice::MatchCAZA},
@@ -606,6 +605,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     {kOverlapChildren, &ZonedBlockDevice::MatchOverlapChildren},
     {kOverlapGrandchildren, &ZonedBlockDevice::MatchOverlapGrandchildren},
     {kCompensatedSize, &ZonedBlockDevice::MatchCompensatedSize},
+    {kOAZA, &ZonedBlockDevice::MatchOAZA},
   };
 
   MappingPolicyType primary_policy;
@@ -640,6 +640,8 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   if(primary_policy == kTombstoneDensity && IsHighTombstone(zonefile))
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  if(primary_policy == kCAZA && zenfs_parameters_.real_caza)
+    *best_diff_out = LIFETIME_DIFF_COULD_BE_WORSE;
   if(*zone_out != old_zone)
     return s;
 
@@ -814,7 +816,11 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         Info(logger_,
               "Allocator: avoided a finish by relaxing lifetime diff "
               "requirement\n");
-      } else if(GetEmptyZoneCount() > zenfs_parameters_.reserve_zone_count) {
+      }
+      // added the else if to ensure that it doesn't try to allocate a new zone
+      // if no empty zone is available
+      // previously program crashed despite having some available space in non-empty zones
+      else if(GetEmptyZoneCount() > zenfs_parameters_.reserve_zone_count) { 
         s = allocated_zone->CheckRelease();
         if (!s.ok()) {
           PutOpenIOZoneToken();
