@@ -251,6 +251,8 @@ ZenFS::ZenFS(ZonedBlockDevice* zbd, std::shared_ptr<FileSystem> aux_fs,
   Info(logger_, "ZenFS initializing");
   next_file_id_ = 1;
   metadata_writer_.zenFS = this;
+  zbd_->files_ = &files_;
+  zbd_->files_mtx_ = &files_mtx_;
 }
 
 ZenFS::~ZenFS() {
@@ -1534,7 +1536,7 @@ static std::string GetLogFilename(std::string bdev) {
   char buf[40];
 
   std::strftime(buf, sizeof(buf), "%Y-%m-%d_%H:%M:%S.log", log_start);
-  ss << DEFAULT_ZENV_LOG_PATH << std::string("zenfs_") << bdev << "_" << buf;
+  ss << DEFAULT_ZENV_LOG_PATH << std::string("zenfs_") << bdev << ".log";// << "_" << buf;
 
   return ss.str();
 }

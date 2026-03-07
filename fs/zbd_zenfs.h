@@ -169,12 +169,15 @@ class ZonedBlockDevice {
   time_t start_time_;
   std::shared_ptr<Logger> logger_;
   uint32_t finish_threshold_ = 0;
+  std::unordered_map<uint64_t, Zone*> zone_start_to_pointer_map_;
+  std::unordered_map<uint64_t, Zone*> zone_index_to_pointer_map_;
 
   // bookkeeping
   std::atomic<uint64_t> bytes_written_{0};
   std::atomic<uint64_t> gc_bytes_written_{0};
   uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
   uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
+  uint64_t total_reset_count_ = 0;
 
   std::atomic<long> active_io_zones_;
   std::atomic<long> open_io_zones_;
@@ -209,6 +212,10 @@ class ZonedBlockDevice {
 
   // mutex to be acquired when accessing/modifying levelwise_file_list_
   std::mutex levelwise_files_mtx_;
+  std::mutex alloc_mutex_;
+
+  std::map<std::string, std::shared_ptr<ZoneFile>> *files_ = nullptr;
+  std::mutex *files_mtx_ = nullptr;
 
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
@@ -275,15 +282,18 @@ class ZonedBlockDevice {
   // Adds a new file to the appropriate level and position of levelwise_file_list_
   // Called after the whole file is written
   void AddZoneFileRecord(ZoneFile* zonefile_ptr);
+  void AddZoneFileRecordNoLock(ZoneFile* zonefile_ptr);
   // Searches for and removes a particular file from levelwise_file_list_
   // Called when a file is marked as deleted
   void RemoveZoneFileRecord(ZoneFile* zonefile_ptr);
+  void RemoveZoneFileRecordNoLock(ZoneFile* zonefile_ptr);
   // Re-computes the compensated file sizes for all recorded files
   void RecomputeCompensatedFileSizes();
 
   uint64_t GetEmptyZoneCount();
   uint64_t GetAllocCount() { return alloc_count_; }
   uint64_t GetFailureCount() { return failure_count_; }
+  uint64_t GetTotalResetCount() { return total_reset_count_; }
   uint64_t GetFreePercent();
 
  private:
@@ -321,6 +331,10 @@ class ZonedBlockDevice {
                                     Env::WriteLifeTimeHint file_lifetime,
                                     unsigned int *best_diff_out, Zone **zone_out,
                                     uint32_t min_capacity = 0);
+  IOStatus MatchSameLevelNearbyKeysSimple(ZoneFile* zonefile,
+                                          Env::WriteLifeTimeHint file_lifetime,
+                                          unsigned int *best_diff_out, Zone **zone_out,
+                                          uint32_t min_capacity = 0);
   // Fills a zone in order of arrival (per-level)
   IOStatus MatchArrivalTimeBased(ZoneFile* zonefile,
                                   Env::WriteLifeTimeHint file_lifetime,
@@ -365,6 +379,17 @@ class ZonedBlockDevice {
                       Env::WriteLifeTimeHint file_lifetime,
                       unsigned int *best_diff_out, Zone **zone_out,
                       uint32_t min_capacity = 0);
+
+  IOStatus ChooseZoneWithClosestFile(ZoneFile* zonefile,
+                                     uint64_t zonefile_index,
+                                     std::vector<ZoneFile*> &own_level_files,
+                                     Zone* &allocated_zone,
+                                     uint32_t min_capacity = 0);
+
+  IOStatus ChooseZoneWithHighestContrib(Zone* &allocated_zone,
+                                        uint64_t &highest_contribution,
+                                        std::map<uint64_t, uint64_t> &contribution_map,
+                                        uint32_t min_capacity = 0);
   
   // Related to the allocation of a new empty zone when needed
   // Only relevant when static zone-to-block mapping is used in the underlying ZNS SSD
@@ -381,12 +406,20 @@ class ZonedBlockDevice {
   IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out, int level);
 
   // levelwise_files_mtx_ must be held before calling
-  // Returns an array of pointers to files that overlap with zonefile_ptr in a target_level
+  // Returns a vector of pointers to files that overlap with zonefile_ptr in a target_level
   void GetOverlappingFiles(std::vector<ZoneFile*>& ret_container, ZoneFile* zonefile_ptr, int target_level);
+  // Returns a vector of pointers to all files in target_level
+  void GetSameLevelFiles(std::vector<ZoneFile*>& ret_container, int target_level);
+  // Returns the total number of files that overlap with zonefile_ptr in target_level
+  uint64_t GetOverlapFileCount(ZoneFile* zonefile_ptr, int target_level);
   // Returns the total number of bytes across files that overlap with zonefile_ptr in target_level
-  uint64_t GetOverlapCount(ZoneFile* zonefile_ptr, int target_level);
+  uint64_t GetOverlapByteCount(ZoneFile* zonefile_ptr, int target_level);
+  // Returns the total number of keys across files that overlap with zonefile_ptr in target_level
+  uint64_t GetOverlapKeyCount(ZoneFile* zonefile_ptr, int target_level);
   // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
-  void OverlapRankHelper(std::vector<ZoneFile*>& container, int own_level, int target_level);
+  void OverlapRankHelperSizeBased(std::vector<ZoneFile*>& container, int own_level, int target_level);
+  // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
+  void OverlapRankHelperKeyBased(std::vector<ZoneFile*>& container, int own_level, int target_level);
   // Returns true if the given files overlap
   bool IsOverlapping(ZoneFile* a, ZoneFile* b, InternalKeyComparator& icmp);
   // Returns true if the ratio of tombstones in the given file is higher than the threshold

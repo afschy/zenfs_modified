@@ -14,9 +14,11 @@ enum EmptyZoneAllocType { // When an empty zone is needed, how is it chosen from
 
 enum MappingPolicyType {  // In which zone to put a newly created file
   kLifetimeBased, // ZenFS default, no change
+  kLeveledLifetimeBased,  // The version of LIZA found in the ZoneKV paper as a fallback
   kCAZA, // Files are put in the same zones as other files in neighboring level with overlapping keyranges
   kSameLevelNearbyKeys, // Nearest
-  kArrivalTimeBased, // Files are put in order of arrival, greedily filling up available zones, ZoneKV
+  kSameLevelNearbyKeysSimple, // Nearest simplified
+  kArrivalTimeBased, // Files are put in order of arrival per level, greedily filling up available zones, ZoneKV
   kTombstoneDensity, // Files having tombstone densities higher than a threshold go to a dedicated zone
   kTombstoneTTL, // Files having similar TTL should go to the same zones
   kClusterTogether, // Try to put everything in the same zone, full naive
@@ -34,6 +36,8 @@ enum GCType {
 struct ZenfsParamContainer {
   EmptyZoneAllocType empty_zone_allocator = kDefault;
   uint8_t real_caza = 1;
+  uint8_t real_oaza = 1;
+  uint8_t real_zonekv = 1;
 
   uint64_t average_value_size = 48;
   
@@ -84,8 +88,10 @@ struct ZenfsParamContainer {
     static std::unordered_map<std::string, MappingPolicyType>
       mapping_policy_map = {
         {"kLifetimeBased", kLifetimeBased},
+        {"kLeveledLifetimeBased", kLeveledLifetimeBased},
         {"kCAZA", kCAZA},
         {"kSameLevelNearbyKeys", kSameLevelNearbyKeys},
+        {"kSameLevelNearbyKeysSimple", kSameLevelNearbyKeysSimple},
         {"kArrivalTimeBased", kArrivalTimeBased},
         {"kTombstoneDensity", kTombstoneDensity},
         {"kTombstoneTTL", kTombstoneTTL},
@@ -173,6 +179,24 @@ struct ZenfsParamContainer {
           reserve_zone_count = value_int;
       }
 
+      else if(type == "real_caza") {
+        int value_int = std::stoi(value);
+        if(value_int == 0 || value_int == 1)
+          real_caza = value_int;
+      }
+
+      else if(type == "real_oaza") {
+        int value_int = std::stoi(value);
+        if(value_int == 0 || value_int == 1)
+          real_oaza = value_int;
+      }
+
+      else if(type == "real_zonekv") {
+        int value_int = std::stoi(value);
+        if(value_int == 0 || value_int == 1)
+          real_zonekv = value_int;
+      }
+
       else if(type == "min_boundary") {
         int value_int = std::stoi(value);
         if(value_int >= 0 && value_int < 100)
@@ -216,16 +240,18 @@ struct ZenfsParamContainer {
 
     if(max_boundary <= min_boundary)
       max_boundary = min_boundary + 1;
+  }
 
-    fprintf(stdout, "UniZNS parameter initialization complete\n");
-    fprintf(stdout, "Log file name = %s\n", logname.c_str());
-    fprintf(stdout, "gc_type = %d\n", gc_type);
-    fprintf(stdout, "upper_level_policy = %d\n", upper_level_policy);
-    fprintf(stdout, "middle_level_policy = %d\n", middle_level_policy);
-    fprintf(stdout, "lower_level_policy = %d\n", lower_level_policy);
-    fprintf(stdout, "GC start level = %lu\n", gc_start_level);
-    fprintf(stdout, "GC stop level = %lu\n", gc_stop_level);
-    fprintf(stdout, "fragmentation = %u\n", fragmentation_enabled);
+  void PrintStats(FILE *fp) {
+    fprintf(fp, "UniZNS parameter initialization complete\n");
+    fprintf(fp, "Log file name = %s\n", logname.c_str());
+    fprintf(fp, "gc_type = %d\n", gc_type);
+    fprintf(fp, "upper_level_policy = %d\n", upper_level_policy);
+    fprintf(fp, "middle_level_policy = %d\n", middle_level_policy);
+    fprintf(fp, "lower_level_policy = %d\n", lower_level_policy);
+    fprintf(fp, "GC start level = %lu\n", gc_start_level);
+    fprintf(fp, "GC stop level = %lu\n", gc_stop_level);
+    fprintf(fp, "fragmentation = %u\n", fragmentation_enabled);
   }
 };
 

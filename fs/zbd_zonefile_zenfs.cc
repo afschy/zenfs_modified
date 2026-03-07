@@ -278,10 +278,8 @@ time_t ZoneFile::GetFileModificationTime() { return m_time_; }
 
 uint64_t ZoneFile::GetFileSize() { return file_size_; }
 uint64_t ZoneFile::GetFileSizeMeta() {
-  if(file_size_meta_ == 0)
-    file_size_meta_ = file_size_;
-  if(file_size_meta_ == 0)
-    file_size_meta_ = alloc_size_;
+  file_size_meta_ = std::max(file_size_meta_, file_size_);
+  file_size_meta_ = std::max(file_size_meta_, alloc_size_);
   return file_size_meta_;
 }
 void ZoneFile::SetFileSize(uint64_t sz) { file_size_ = sz; }
@@ -855,16 +853,17 @@ void ZoneFile::UpdateInternalKeysRange(const Slice& start, const Slice& end, Seq
 }
 
 void ZoneFile::UpdateMetadata(const TableProperties& table_properties) {
-  num_entries_ = table_properties.num_entries;
-  num_deletions_ = table_properties.num_deletions;
-  num_range_deletions_ = table_properties.num_range_deletions;
+  num_entries_ = std::max(num_entries_, table_properties.num_entries);
+  num_deletions_ = std::max(num_deletions_ ,table_properties.num_deletions);
+  num_range_deletions_ = std::max(num_range_deletions_, table_properties.num_range_deletions);
+  file_size_meta_ = std::max(file_size_meta_, table_properties.data_size);
 }
 
 void ZoneFile::UpdateMetadata(uint64_t num_entries, uint64_t num_deletions, uint64_t num_range_deletions, uint64_t file_size, uint64_t compensated_range_deletion_size, uint64_t average_value_size) {
-  num_entries_ = num_entries;
-  num_deletions_ = num_deletions;
-  num_range_deletions_ = num_range_deletions;
-  file_size_meta_ = std::max(file_size_meta_, file_size_);
+  num_entries_ = std::max(num_entries_ ,num_entries);
+  num_deletions_ = std::max(num_deletions_, num_deletions);
+  num_range_deletions_ = std::max(num_range_deletions_, num_range_deletions);
+  file_size_meta_ = std::max(file_size_meta_, file_size);
   compensated_range_deletion_size_ = std::max(compensated_range_deletion_size_, compensated_range_deletion_size);
 
   if(average_value_size == 0) return;
@@ -902,10 +901,8 @@ void ZoneFile::CreateOrUpdateRecord() {
 
 void ZoneFile::ComputeCompensatedSize() {
   uint64_t average_value_size = zbd_->zenfs_parameters_.average_value_size;
-  if(file_size_meta_ == 0)
-    file_size_meta_ = file_size_;
-  if(file_size_meta_ == 0)
-    file_size_meta_ = alloc_size_;
+  file_size_meta_ = std::max(file_size_meta_, file_size_);
+  file_size_meta_ = std::max(file_size_meta_, alloc_size_);
   compensated_file_size_ = file_size_meta_;
   
   if ((num_deletions_ - num_range_deletions_) * 2 >= num_entries_) {

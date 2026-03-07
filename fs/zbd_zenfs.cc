@@ -185,6 +185,8 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
   zenfs_parameters_.LoadParamsFromFile();
   logfile_ = fopen(zenfs_parameters_.logname.c_str(), "w");
   fprintf(logfile_, "Created ZBD\n");
+  zenfs_parameters_.PrintStats(logfile_);
+  fflush(logfile_);
 }
 
 IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
@@ -233,7 +235,10 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
     /* Only use sequential write required zones */
     if (zbd_be_->ZoneIsSwr(zone_rep, i)) {
       if (!zbd_be_->ZoneIsOffline(zone_rep, i)) {
-        meta_zones.push_back(new Zone(this, zbd_be_.get(), zone_rep, i));
+        Zone *newZone = new Zone(this, zbd_be_.get(), zone_rep, i);
+        meta_zones.push_back(newZone);
+        zone_start_to_pointer_map_[newZone->start_] = newZone;
+        zone_index_to_pointer_map_[newZone->GetZoneNr()] = newZone;
       }
       m++;
     }
@@ -254,6 +259,8 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
                                       std::to_string(newZone->GetZoneNr()));
         }
         io_zones.push_back(newZone);
+        zone_start_to_pointer_map_[newZone->start_] = newZone;
+        zone_index_to_pointer_map_[newZone->GetZoneNr()] = newZone;
         if (zbd_be_->ZoneIsActive(zone_rep, i)) {
           active_io_zones_++;
           if (zbd_be_->ZoneIsOpen(zone_rep, i)) {
@@ -438,6 +445,7 @@ IOStatus ZonedBlockDevice::ResetUnusedIOZones() {
         bool full = z->IsFull();
         IOStatus reset_status = z->Reset();
         IOStatus release_status = z->CheckRelease();
+        total_reset_count_++;
         if (!reset_status.ok()) return reset_status;
         if (!release_status.ok()) return release_status;
         if (!full) PutActiveIOZoneToken();
@@ -587,9 +595,14 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     unsigned int *best_diff_out,
     Zone **zone_out, uint32_t min_capacity) {
   
+  int level = zonefile->level_;
   // If not SST file or required info missing, use the default
   if(zonefile->level_ < 0 || !zonefile->has_keys_ || zonefile->GetIOType() != IOType::kData)
     return MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out);
+
+  zenfs_parameters_.lock_max_level.lock();
+  uint64_t max_level = zenfs_parameters_.max_level;
+  zenfs_parameters_.lock_max_level.unlock();
   
   // function pointer type that can hold any instance of a Match.* function
   typedef IOStatus (ZonedBlockDevice::*MatchFunctionType)(ZoneFile* zonefile, Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out, Zone **zone_out, uint32_t min_capacity);
@@ -598,6 +611,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     {kLifetimeBased, &ZonedBlockDevice::MatchLifetimeBased},
     {kCAZA, &ZonedBlockDevice::MatchCAZA},
     {kSameLevelNearbyKeys, &ZonedBlockDevice::MatchSameLevelNearbyKeys},
+    {kSameLevelNearbyKeysSimple, &ZonedBlockDevice::MatchSameLevelNearbyKeysSimple},
     {kArrivalTimeBased, &ZonedBlockDevice::MatchArrivalTimeBased},
     {kTombstoneDensity, &ZonedBlockDevice::MatchTombstoneDensity},
     {kTombstoneTTL, &ZonedBlockDevice::MatchTombstoneTTL},
@@ -635,17 +649,21 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     return s;
 
   s = (this->*fallback_policy_function)(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  
   // primary policy needs a special zone but didn't find one, should open a new zone for that purpose
   if(primary_policy == kArrivalTimeBased || primary_policy == kClusterTogether)
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   if(primary_policy == kTombstoneDensity && IsHighTombstone(zonefile))
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   if(primary_policy == kCAZA && zenfs_parameters_.real_caza)
-    *best_diff_out = LIFETIME_DIFF_COULD_BE_WORSE;
+    *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  if(primary_policy == kOAZA && zenfs_parameters_.real_oaza && level < (int)max_level)
+    *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_NOT_GOOD, *best_diff_out);
+  
   if(*zone_out != old_zone)
     return s;
-
-  s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  if (zenfs_parameters_.real_oaza == false)
+    s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
   *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   // fprintf(logfile_, "Policy failure\n");
   failure_count_++;
@@ -729,7 +747,8 @@ IOStatus ZonedBlockDevice::TakeMigrateZone(Zone **out_zone,
                                            bool* alloc_new) {
   std::unique_lock<std::mutex> lock(migrate_zone_mtx_);
   migrate_resource_.wait(lock, [this] { return !migrating_; });
-
+  // std::lock_guard<std::mutex> lk(alloc_mutex_);
+  
   migrating_ = true;
   *alloc_new = false;
 
@@ -754,6 +773,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
                                           Zone **out_zone,
                                           ZoneFile* zonefile) {
 
+  std::lock_guard<std::mutex> lk(alloc_mutex_);
   zenfs_parameters_.lock_max_level.lock();
   if(zonefile->level_ > zenfs_parameters_.max_level)
     zenfs_parameters_.max_level = zonefile->level_;
@@ -812,10 +832,14 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
      * and open a new one
      */
     if (allocated_zone != nullptr) {
-      if (!got_token && best_diff == LIFETIME_DIFF_COULD_BE_WORSE) {
+      if (!got_token && best_diff == LIFETIME_DIFF_COULD_BE_WORSE) {   // did not get permission to open an empty zone
+        // if (best_diff == LIFETIME_DIFF_COULD_BE_WORSE) {    // settling for the zone we got for medium lifetime diff
         Info(logger_,
               "Allocator: avoided a finish by relaxing lifetime diff "
               "requirement\n");
+        // }
+        // if lifetime diff was very bad
+        // we would try to open a new zone even by finishing and closing some active zones
       }
       // added the else if to ensure that it doesn't try to allocate a new zone
       // if no empty zone is available
