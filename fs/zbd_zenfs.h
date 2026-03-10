@@ -386,6 +386,12 @@ class ZonedBlockDevice {
                                      Zone* &allocated_zone,
                                      uint32_t min_capacity = 0);
 
+  IOStatus ChooseZoneWithClosestRank(ZoneFile* zonefile,
+                                     uint64_t zonefile_index,
+                                     std::vector<ZoneFile*> &own_level_ranking,
+                                     Zone* &allocated_zone,
+                                     uint32_t min_capacity = 0);
+
   IOStatus ChooseZoneWithHighestContrib(Zone* &allocated_zone,
                                         uint64_t &highest_contribution,
                                         std::map<uint64_t, uint64_t> &contribution_map,

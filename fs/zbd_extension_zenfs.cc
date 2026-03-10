@@ -745,11 +745,16 @@ ZonedBlockDevice::MatchOverlapChildren(
 
   int level = zonefile->level_;
   // trivial moves can happen, simulating those
-  // while(level < zenfs_parameters_.max_level) {
-  //   if(GetOverlapFileCount(zonefile, level+1))
-  //     break;
-  //   level++;
-  // }
+  while(level < zenfs_parameters_.max_level) {
+    if(GetOverlapFileCount(zonefile, level+1))
+      break;
+    level++;
+  }
+  if (level > zonefile->level_) {
+    RemoveZoneFileRecordNoLock(zonefile);
+    zonefile->level_ = level;
+    AddZoneFileRecordNoLock(zonefile);
+  }
   if(level < 0 || (unsigned)level >= levelwise_file_list_.size()) {
     *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
     return IOStatus::OK();
@@ -767,7 +772,7 @@ ZonedBlockDevice::MatchOverlapChildren(
 
   // also compute the ranking of upper level files
   std::vector<ZoneFile*> upper_level_ranking;
-  if(level-1 > 0) {
+  if(level-1 >= 0) {
     for(auto it = levelwise_file_list_[level-1].begin(); it != levelwise_file_list_[level-1].end(); ++it) {
       if((*it) == zonefile) continue;
       upper_level_ranking.emplace_back(*it);
@@ -1075,8 +1080,16 @@ ZonedBlockDevice::MatchOAZA(
   }
 
   Zone* allocated_zone = nullptr;
-  IOStatus s = ChooseZoneWithClosestFile(zonefile, zonefile_index, own_level_ranking, allocated_zone, min_capacity);
-  if(!s.ok()) return s;
+  
+  if (zenfs_parameters_.real_oaza) {
+    IOStatus s = ChooseZoneWithClosestRank(zonefile, zonefile_index, own_level_ranking, allocated_zone, min_capacity);
+    if(!s.ok()) return s;
+  }
+
+  else {
+    IOStatus s = ChooseZoneWithClosestFile(zonefile, zonefile_index, own_level_ranking, allocated_zone, min_capacity);
+    if(!s.ok()) return s;
+  }
 
   if(allocated_zone == nullptr)
     *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
@@ -1157,8 +1170,8 @@ void ZonedBlockDevice::OverlapRankHelperKeyBased(
   std::sort(container.begin(), container.end(), [](ZoneFile*& left, ZoneFile*& right){
     return left->rank_ < right->rank_;
   });
-  for(unsigned int i=0; i<container.size(); i++)
-    container[i]->rank_ = i+1;
+  // for(unsigned int i=0; i<container.size(); i++)
+  //   container[i]->rank_ = i+1;
 }
 
 bool ZonedBlockDevice::IsOverlapping(
@@ -1243,6 +1256,75 @@ IOStatus ZonedBlockDevice::ChooseZoneWithClosestFile(
       break;
     prev_index--;
     next_index++;
+  }
+  return IOStatus::OK();
+}
+
+IOStatus ZonedBlockDevice::ChooseZoneWithClosestRank(
+    ZoneFile* zonefile,
+    uint64_t zonefile_index,
+    std::vector<ZoneFile*> &own_level_ranking,
+    Zone* &allocated_zone,
+    uint32_t min_capacity) {
+  
+  int prev_index = zonefile_index - 1;
+  int next_index = zonefile_index + 1;
+  while (prev_index > 0 && next_index < (int)own_level_ranking.size()) {
+    uint64_t prev_diff = INT64_MAX, next_diff = INT64_MAX;
+    if (prev_index >= 0)
+      prev_diff = labs(zonefile->rank_ - own_level_ranking[prev_index]->rank_);
+    if (next_index < (int)own_level_ranking.size())
+      next_diff = labs(own_level_ranking[next_index]->rank_ - zonefile->rank_);
+
+    ZoneFile* closest_file = nullptr;
+    if (prev_diff < next_diff) {
+      closest_file = own_level_ranking[prev_index];
+      prev_index--;
+    }
+    else {
+      closest_file = own_level_ranking[next_index];
+      next_index++;
+    }
+    
+    uint64_t highest_contribution = 0;
+    ZoneFileSnapshot snapshot(*closest_file);
+    IOStatus s;
+    for(const auto &ext : snapshot.extents) {
+
+      if(zone_start_to_pointer_map_.count(ext.zone_start) == 0) {
+        fprintf(logfile_, "Invalid zone\n");
+        fflush(logfile_);
+        continue;
+      }
+      Zone* z = zone_start_to_pointer_map_[ext.zone_start];
+      if (!z->Acquire())
+        continue;
+        
+      if ((z->used_capacity_ > 0) && !z->IsFull() &&
+          z->capacity_ >= min_capacity) {
+        uint64_t contribution = ext.length;
+        if (contribution > highest_contribution) {
+          if (allocated_zone != nullptr) {
+            s = allocated_zone->CheckRelease();
+            if (!s.ok()) {
+              IOStatus s_ = z->CheckRelease();
+              if (!s_.ok()) return s_;
+              return s;
+            }
+          }
+          allocated_zone = z;
+          highest_contribution = contribution;
+        } else {
+          s = z->CheckRelease();
+          if (!s.ok()) return s;
+        }
+      } else {
+        s = z->CheckRelease();
+        if (!s.ok()) return s;
+      }
+    }
+    if (allocated_zone != nullptr)
+      break;
   }
   return IOStatus::OK();
 }

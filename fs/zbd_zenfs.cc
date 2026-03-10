@@ -384,7 +384,8 @@ void ZonedBlockDevice::LogGarbageInfo() {
     }
     assert(garbage_rate >= 0);
     int idx = int((garbage_rate + 0.1) * 10);
-    zone_gc_stat[idx]++;
+    if (idx >= 0 && idx < 12)
+      zone_gc_stat[idx]++;
 
     z->Release();
   }
@@ -657,13 +658,17 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   if(primary_policy == kCAZA && zenfs_parameters_.real_caza)
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
-  if(primary_policy == kOAZA && zenfs_parameters_.real_oaza && level < (int)max_level)
+  if(primary_policy == kOAZA && zenfs_parameters_.real_oaza && level < (int)max_level && zonefile->level_ > level)
     *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_NOT_GOOD, *best_diff_out);
+  if(primary_policy == kOAZA && !zenfs_parameters_.real_oaza && zonefile->level_ < (int)max_level)
+    *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
+  // if(primary_policy == kOverlapChildren && zonefile->level_ > level)
+  //   *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_NOT_GOOD, *best_diff_out);
   
   if(*zone_out != old_zone)
     return s;
-  if (zenfs_parameters_.real_oaza == false)
-    s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  // if (primary_policy != kOAZA || !zenfs_parameters_.real_oaza)
+  s = MatchLifetimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
   *best_diff_out = std::max((unsigned int)LIFETIME_DIFF_COULD_BE_WORSE, *best_diff_out);
   // fprintf(logfile_, "Policy failure\n");
   failure_count_++;

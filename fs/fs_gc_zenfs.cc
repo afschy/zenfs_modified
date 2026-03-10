@@ -177,12 +177,13 @@ uint32_t ZenFS::SelectGarbageZonesImproved(ZenFSSnapshot& snapshot,
   if(free_target_percent <= 0)
     return 0;
   uint64_t free_target_bytes = (zbd_->GetUsedSpace() + zbd_->GetReclaimableSpace()) * free_target_percent / 100;
+  uint64_t free_target_zones = ceil(1.00 * zbd_->GetNrZones() * free_target_percent / 100);
   fprintf(zbd_->logfile_, "Trying to free %d%%, %lu MB of space\n", free_target_percent, free_target_bytes / (1<<20));
                                             
   uint32_t reset_zone_count = 0;
   uint64_t freed_bytes = 0;
   for (const auto& zone : sorted_snapshots) {
-    if(freed_bytes >= free_target_bytes) break;
+    if(reset_zone_count >= free_target_zones) break;
     if (zone.capacity != 0) continue;
     
     migrate_zones_start.emplace(zone.start);
@@ -198,14 +199,18 @@ void ZenFS::GCWorker() {
   GC_START_LEVEL = container.gc_start_level;
   GC_SLOPE = container.gc_slope;
   GC_PAUSE_SECONDS = container.gc_pause_seconds;
+  uint64_t counter = 0;
 
   while (run_gc_worker_) {
     usleep(1000 * 1000 * GC_PAUSE_SECONDS);
+    if(!run_gc_worker_) break;
+    std::lock_guard<std::mutex> lk(zbd_->alloc_mutex_);
 
     uint64_t free_percent = zbd_->GetFreePercent();
+    counter++;
 
-    fprintf(zbd_->logfile_, "-------------------------------------------------------------------------------------------\n");
-    fprintf(zbd_->logfile_, "Total allocation request = %lu, total policy failure = %lu, ", zbd_->GetAllocCount(), zbd_->GetFailureCount());
+    fprintf(zbd_->logfile_, "-----%08lu-----\n", counter);
+    fprintf(zbd_->logfile_, "Reset count = %lu, Allocation requests = %lu, Failures = %lu, ", zbd_->GetTotalResetCount(), zbd_->GetAllocCount(), zbd_->GetFailureCount());
     fprintf(zbd_->logfile_, "Failure rate = %0.2lf\n", 1.00 * zbd_->GetFailureCount() / zbd_->GetAllocCount());
     fprintf(zbd_->logfile_, "Before GC: %lu%% free, %lu empty zones\n", free_percent, zbd_->GetEmptyZoneCount());
     if (free_percent > GC_START_LEVEL) {
@@ -214,6 +219,7 @@ void ZenFS::GCWorker() {
       continue;
     }
     fprintf(zbd_->logfile_, "GC triggered\n");
+    fflush(zbd_->logfile_);
 
     uint64_t data_movement_before_gc = zbd_->GetGCBytesWritten();
     uint64_t empty_count_before_gc = zbd_->GetEmptyZoneCount();
@@ -236,21 +242,51 @@ void ZenFS::GCWorker() {
         SelectGarbageZonesDefault(snapshot, free_percent, migrate_zones_start);
     }
 
-    std::vector<ZoneExtentSnapshot*> migrate_exts;
+    std::vector< std::vector<ZoneExtentSnapshot*> > migrate_ext_list;
+    migrate_ext_list.resize(migrate_zones_start.size()+1);
+    std::map<uint64_t, uint64_t> zone_start_to_idx_map;
+    
+    size_t index = 0;
+    for (auto& zone_start : migrate_zones_start) {
+      zone_start_to_idx_map[zone_start] = index;
+      index++;
+    }
+
+    // std::vector<ZoneExtentSnapshot*> migrate_exts;
     for (auto& ext : snapshot.extents_) {
       if (migrate_zones_start.find(ext.zone_start) !=
           migrate_zones_start.end()) {
-        migrate_exts.push_back(&ext);
+        index = zone_start_to_idx_map[ext.zone_start];
+        migrate_ext_list[index].push_back(&ext);
+        // migrate_exts.push_back(&ext);
       }
     }
 
-    if (migrate_exts.size() > 0) {
-      IOStatus s;
-      s = MigrateExtents(migrate_exts);
-      if (!s.ok()) {
-        Error(logger_, "Garbage collection failed");
+    for (index = 0; index < migrate_ext_list.size(); index++) {
+      if (migrate_ext_list[index].size() > 0) {
+        IOStatus s;
+        s = MigrateExtents(migrate_ext_list[index]);
+        if (!s.ok()) {
+          Error(logger_, "Garbage collection failed");
+        }
       }
     }
+
+    // std::vector<ZoneExtentSnapshot*> migrate_exts;
+    // for (auto& ext : snapshot.extents_) {
+    //   if (migrate_zones_start.find(ext.zone_start) !=
+    //       migrate_zones_start.end()) {
+    //     migrate_exts.push_back(&ext);
+    //   }
+    // }
+
+    // if (migrate_exts.size() > 0) {
+    //   IOStatus s;
+    //   s = MigrateExtents(migrate_exts);
+    //   if (!s.ok()) {
+    //     Error(logger_, "Garbage collection failed");
+    //   }
+    // }
 
     uint64_t data_movement_this_iteration = zbd_->GetGCBytesWritten() - data_movement_before_gc;
     uint64_t empty_count_this_iteration = zbd_->GetEmptyZoneCount() - empty_count_before_gc;
