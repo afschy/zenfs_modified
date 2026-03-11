@@ -39,7 +39,7 @@ struct ZenfsParamContainer {
   uint8_t real_oaza = 1;
   uint8_t real_zonekv = 1;
 
-  uint64_t average_value_size = 48;
+  uint64_t average_value_size = 4080;
   
   uint8_t max_level = 1;
   std::mutex lock_max_level;
