@@ -187,6 +187,9 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
   fprintf(logfile_, "Created ZBD\n");
   zenfs_parameters_.PrintStats(logfile_);
   fflush(logfile_);
+  
+  std::string zonestate_filename = "zonestate_" + zenfs_parameters_.logname;
+  zonestate_logfile_ = fopen(zonestate_filename.c_str(), "w");
 }
 
 IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
@@ -399,6 +402,26 @@ void ZonedBlockDevice::LogGarbageInfo() {
   Info(logger_, "%s", ss.str().data());
 }
 
+void ZonedBlockDevice::LogDetailedZoneState() {
+  for (const auto z : io_zones) {
+    int zone_no = z->GetZoneNr();
+    double sat_p = 100.00 * (z->max_capacity_ - z->capacity_) / z->max_capacity_;
+    double val_p = 100.00 * z->used_capacity_ / z->max_capacity_;
+    
+    bool empty = z->IsEmpty();
+    bool open = (z->used_capacity_ > 0) && !z->IsFull();
+    bool closed = z->capacity_ == 0;
+
+    std::string state = "undefined";
+    if (open) state = "open";
+    else if (closed) state = "closed";
+    else if (empty) state = "empty";
+
+    fprintf(zonestate_logfile_, "No: %d, sat: %0.4lf%%, val: %0.4lf%%, state: %s\n", zone_no, sat_p, val_p, state.c_str());
+  }
+  fflush(zonestate_logfile_);
+}
+
 ZonedBlockDevice::~ZonedBlockDevice() {
   for (const auto z : meta_zones) {
     delete z;
@@ -439,17 +462,21 @@ IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
   return IOStatus::NoSpace("Out of metadata zones");
 }
 
-IOStatus ZonedBlockDevice::ResetUnusedIOZones() {
+IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
   for (const auto z : io_zones) {
     if (z->Acquire()) {
       if (!z->IsEmpty() && !z->IsUsed()) {
         bool full = z->IsFull();
         IOStatus reset_status = z->Reset();
         IOStatus release_status = z->CheckRelease();
-        total_reset_count_++;
         if (!reset_status.ok()) return reset_status;
         if (!release_status.ok()) return release_status;
         if (!full) PutActiveIOZoneToken();
+        total_reset_count_++;
+        if (gc) { 
+          z->flag_gc_reset_ = true;
+          gc_reset_count_++;
+        }
       } else {
         IOStatus release_status = z->CheckRelease();
         if (!release_status.ok()) return release_status;
@@ -576,6 +603,7 @@ IOStatus ZonedBlockDevice::FinishCheapestIOZone() {
     return IOStatus::OK();
   }
 
+  AddFinishBytesWritten(finish_victim->capacity_);
   s = finish_victim->Finish();
   IOStatus release_status = finish_victim->CheckRelease();
 

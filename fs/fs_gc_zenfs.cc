@@ -44,7 +44,7 @@ IOStatus ZenFS::MigrateExtents(
   for (const auto& it : file_extents) {
     s = MigrateFileExtents(it.first, it.second);
     if (!s.ok()) break;
-    s = zbd_->ResetUnusedIOZones();
+    s = zbd_->ResetUnusedIOZones(true);
     if (!s.ok()) break;
   }
   return s;
@@ -156,6 +156,8 @@ uint32_t ZenFS::SelectGarbageZonesDefault(ZenFSSnapshot& snapshot,
           garbage_percent_approx < 100) {
         migrate_zones_start.emplace(zone.start);
         reset_zone_count++;
+        Zone* z = zbd_->zone_start_to_pointer_map_[zone.start];
+        if (z) z->flag_gc_reset_ = false;
       }
     }
   }
@@ -189,6 +191,8 @@ uint32_t ZenFS::SelectGarbageZonesImproved(ZenFSSnapshot& snapshot,
     migrate_zones_start.emplace(zone.start);
     reset_zone_count++;
     freed_bytes += (zone.max_capacity - zone.used_capacity);
+    Zone* z = zbd_->zone_start_to_pointer_map_[zone.start];
+    if (z) z->flag_gc_reset_ = false;
   }
   return reset_zone_count;
 }
@@ -200,6 +204,7 @@ void ZenFS::GCWorker() {
   GC_SLOPE = container.gc_slope;
   GC_PAUSE_SECONDS = container.gc_pause_seconds;
   uint64_t counter = 0;
+  uint64_t fail_counter = 0;
 
   while (run_gc_worker_) {
     usleep(1000 * 1000 * GC_PAUSE_SECONDS);
@@ -210,8 +215,10 @@ void ZenFS::GCWorker() {
     counter++;
 
     fprintf(zbd_->logfile_, "-----%08lu-----\n", counter);
+    fprintf(zbd_->zonestate_logfile_, "-----%08lu-----\n", counter);
+    zbd_->LogDetailedZoneState();
     fprintf(zbd_->logfile_, "Reset count = %lu, Allocation requests = %lu, Failures = %lu, ", zbd_->GetTotalResetCount(), zbd_->GetAllocCount(), zbd_->GetFailureCount());
-    fprintf(zbd_->logfile_, "Failure rate = %0.2lf\n", 1.00 * zbd_->GetFailureCount() / zbd_->GetAllocCount());
+    fprintf(zbd_->logfile_, "Failure rate = %0.2lf, Finish = %0.2lf MB\n", 1.00 * zbd_->GetFailureCount() / zbd_->GetAllocCount(), 1.00*zbd_->GetFinishBytesWritten()/(1<<20));
     fprintf(zbd_->logfile_, "Before GC: %lu%% free, %lu empty zones\n", free_percent, zbd_->GetEmptyZoneCount());
     if (free_percent > GC_START_LEVEL) {
       fprintf(zbd_->logfile_, "GC not triggered, free space must be less than %lu%%\n", GC_START_LEVEL);
@@ -222,7 +229,7 @@ void ZenFS::GCWorker() {
     fflush(zbd_->logfile_);
 
     uint64_t data_movement_before_gc = zbd_->GetGCBytesWritten();
-    uint64_t empty_count_before_gc = zbd_->GetEmptyZoneCount();
+    uint64_t gc_reset_before_gc = zbd_->GetGCResetCount();
 
     ZenFSSnapshot snapshot;
     ZenFSSnapshotOptions options;
@@ -288,11 +295,27 @@ void ZenFS::GCWorker() {
     //   }
     // }
 
+    fprintf(zbd_->zonestate_logfile_, "------------------\n");
+    for (auto zone_start : migrate_zones_start) {
+      Zone* z = zbd_->zone_start_to_pointer_map_[zone_start];
+      if (!z) continue;
+      if (!z->flag_gc_reset_) continue;
+
+      uint64_t moved_data = 0;
+      size_t idx = zone_start_to_idx_map[zone_start];
+      for (auto ext : migrate_ext_list[idx])
+        moved_data += ext->length;
+
+      fprintf(zbd_->zonestate_logfile_, "Reset Zone: %lu, Moved: %0.4lf MB\n", z->GetZoneNr(), 1.00*moved_data/(1<<20));
+    }
+    fprintf(zbd_->zonestate_logfile_, "------------------\n");
+    fflush(zbd_->zonestate_logfile_);
+
     uint64_t data_movement_this_iteration = zbd_->GetGCBytesWritten() - data_movement_before_gc;
-    uint64_t empty_count_this_iteration = zbd_->GetEmptyZoneCount() - empty_count_before_gc;
+    uint64_t reset_count_this_iteration = zbd_->GetGCResetCount() - gc_reset_before_gc;
 
     fprintf(zbd_->logfile_, "Reset %lu zones this iteration, moved %0.2lf MB data\n",
-            empty_count_this_iteration, 1.0*data_movement_this_iteration/(1<<20));
+            reset_count_this_iteration, 1.0*data_movement_this_iteration/(1<<20));
 
     fprintf(zbd_->logfile_, "Total bytes written = %0.2lf MB, Total movement due to GC = %0.2f MB\n",
             1.0*zbd_->GetTotalBytesWritten()/(1<<20), 1.0*zbd_->GetGCBytesWritten()/(1<<20));
@@ -302,7 +325,16 @@ void ZenFS::GCWorker() {
             free_percent, zbd_->GetEmptyZoneCount());
     fflush(zbd_->logfile_);
 
+    fprintf(zbd_->zonestate_logfile_, "------------------\n");
+    zbd_->LogDetailedZoneState();
+    fprintf(zbd_->zonestate_logfile_, "-----%08lu-----\n", counter);
+    fflush(zbd_->zonestate_logfile_);
+
     if(container.cold_migration) MigrateColdFiles();
+
+    if(data_movement_this_iteration) fail_counter = 0;
+    else fail_counter++;
+    if (fail_counter >= 10) exit(1);
   }
   fprintf(zbd_->logfile_, "Total GC = %0.2f MB\n", 1.0*zbd_->GetGCBytesWritten()/(1024*1024));
   fflush(zbd_->logfile_);

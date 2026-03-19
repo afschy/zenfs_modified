@@ -77,6 +77,7 @@ class Zone {
   uint32_t finish_count_; // incremented on each call to Finish()
   MappingPolicyType policy_;  // the policy for the ZoneFile object that wrote to this zone first
   int level_; // the level of the ZoneFile object that wrote to this zone first
+  bool flag_gc_reset_ = false;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -169,15 +170,20 @@ class ZonedBlockDevice {
   time_t start_time_;
   std::shared_ptr<Logger> logger_;
   uint32_t finish_threshold_ = 0;
+
+ public:
   std::unordered_map<uint64_t, Zone*> zone_start_to_pointer_map_;
   std::unordered_map<uint64_t, Zone*> zone_index_to_pointer_map_;
-
+  
+ private:
   // bookkeeping
   std::atomic<uint64_t> bytes_written_{0};
   std::atomic<uint64_t> gc_bytes_written_{0};
+  std::atomic<uint64_t> finish_bytes_written_{0};
   uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
   uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
   uint64_t total_reset_count_ = 0;
+  uint64_t gc_reset_count_ = 0;
 
   std::atomic<long> active_io_zones_;
   std::atomic<long> open_io_zones_;
@@ -209,6 +215,7 @@ class ZonedBlockDevice {
   // Stores all new parameters for the platform, loaded from param_loader.h
   ZenfsParamContainer zenfs_parameters_;
   FILE* logfile_;  // for minimal logs, mostly for the garbage collector
+  FILE* zonestate_logfile_; // for printing detailed zone states for all gc iterations
 
   // mutex to be acquired when accessing/modifying levelwise_file_list_
   std::mutex levelwise_files_mtx_;
@@ -241,10 +248,11 @@ class ZonedBlockDevice {
   std::string GetFilename();
   uint32_t GetBlockSize();
 
-  IOStatus ResetUnusedIOZones();
+  IOStatus ResetUnusedIOZones(bool gc=false);
   void LogZoneStats();
   void LogZoneUsage();
   void LogGarbageInfo();
+  void LogDetailedZoneState();
 
   uint64_t GetZoneSize();
   uint32_t GetNrZones();
@@ -273,11 +281,13 @@ class ZonedBlockDevice {
 
   void AddBytesWritten(uint64_t written) { bytes_written_ += written; };
   void AddGCBytesWritten(uint64_t written) { gc_bytes_written_ += written; };
+  void AddFinishBytesWritten(uint64_t written) { finish_bytes_written_ += written; };
   uint64_t GetUserBytesWritten() {
     return bytes_written_.load() - gc_bytes_written_.load();
   };
   uint64_t GetTotalBytesWritten() { return bytes_written_.load(); };
   uint64_t GetGCBytesWritten() { return gc_bytes_written_.load(); };
+  uint64_t GetFinishBytesWritten() { return finish_bytes_written_.load(); };
 
   // Adds a new file to the appropriate level and position of levelwise_file_list_
   // Called after the whole file is written
@@ -294,6 +304,7 @@ class ZonedBlockDevice {
   uint64_t GetAllocCount() { return alloc_count_; }
   uint64_t GetFailureCount() { return failure_count_; }
   uint64_t GetTotalResetCount() { return total_reset_count_; }
+  uint64_t GetGCResetCount() { return gc_reset_count_; }
   uint64_t GetFreePercent();
 
  private:
