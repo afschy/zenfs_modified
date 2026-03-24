@@ -811,6 +811,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
   if(zonefile->level_ > zenfs_parameters_.max_level)
     zenfs_parameters_.max_level = zonefile->level_;
   zenfs_parameters_.lock_max_level.unlock();
+  need_flag = false;
 
   Zone *allocated_zone = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
@@ -914,6 +915,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         allocated_zone->policy_ = GetPolicy(zonefile->level_);
         allocated_zone->level_ = zonefile->level_;
         new_zone = true;
+        if (need_flag) nearest_got_new++;
       } else {
         PutActiveIOZoneToken();
       }

@@ -180,10 +180,6 @@ class ZonedBlockDevice {
   std::atomic<uint64_t> bytes_written_{0};
   std::atomic<uint64_t> gc_bytes_written_{0};
   std::atomic<uint64_t> finish_bytes_written_{0};
-  uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
-  uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
-  uint64_t total_reset_count_ = 0;
-  uint64_t gc_reset_count_ = 0;
 
   std::atomic<long> active_io_zones_;
   std::atomic<long> open_io_zones_;
@@ -212,6 +208,17 @@ class ZonedBlockDevice {
                       const std::vector<Zone *> zones);
 
  public:
+  uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
+  uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
+  
+  uint64_t total_reset_count_ = 0;
+  uint64_t gc_reset_count_ = 0;
+  
+  uint64_t nearest_real_success = 0;
+  uint64_t nearest_need_new = 0;
+  uint64_t nearest_got_new = 0;
+  bool need_flag = false;
+
   // Stores all new parameters for the platform, loaded from param_loader.h
   ZenfsParamContainer zenfs_parameters_;
   FILE* logfile_;  // for minimal logs, mostly for the garbage collector

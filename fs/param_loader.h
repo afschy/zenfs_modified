@@ -34,6 +34,8 @@ enum GCType {
 };
 
 struct ZenfsParamContainer {
+  double nearest_newzone_threshold = 0.0;
+
   EmptyZoneAllocType empty_zone_allocator = kDefault;
   uint8_t real_caza = 1;
   uint8_t real_oaza = 1;
@@ -155,6 +157,12 @@ struct ZenfsParamContainer {
           tombstone_density = value_double;
       }
 
+      else if(type == "nearest_newzone_threshold") {
+        double value_double = std::stod(value);
+        if(value_double >= 0.0 && value_double <= 1.0)
+          nearest_newzone_threshold = value_double;
+      }
+
       else if(type == "gc_start_level") {
         int value_int = std::stoi(value);
         if(value_int > 0 && value_int < 100)
@@ -252,6 +260,7 @@ struct ZenfsParamContainer {
     fprintf(fp, "GC start level = %lu\n", gc_start_level);
     fprintf(fp, "GC stop level = %lu\n", gc_stop_level);
     fprintf(fp, "fragmentation = %u\n", fragmentation_enabled);
+    fprintf(fp, "nearest_newzone_threshold = %lf\n", nearest_newzone_threshold);
   }
 };
 

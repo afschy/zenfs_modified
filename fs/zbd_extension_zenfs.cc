@@ -496,6 +496,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   }
 
   std::map<uint64_t, uint64_t> contribution_map;
+  // const double file_size_max = zenfs_parameters_.buffer_size_megabytes - 1;
   
   double factor = 1.0;
   for(unsigned int i = index_middle; i<levelwise_file_list_[level].size(); i++) {
@@ -504,6 +505,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
       continue;
     GetPerZoneContribution(curr, contribution_map, factor);
     factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
+    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
     if(factor < 0.2)
       factor = 0.2;
   }
@@ -513,6 +515,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     ZoneFile *curr = same_level_files[i];
     GetPerZoneContribution(curr, contribution_map, factor);
     factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
+    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
     if(factor < 0.2)
       factor = 0.2;
   }
@@ -526,8 +529,13 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
   else {
     *best_diff_out = 0;
-    // if(1.0*highest_contribution/allocated_zone->used_capacity_ < 0.21)
-    //   *best_diff_out = LIFETIME_DIFF_COULD_BE_WORSE;
+    if(1.0*highest_contribution/allocated_zone->used_capacity_ < zenfs_parameters_.nearest_newzone_threshold) {
+      *best_diff_out = LIFETIME_DIFF_COULD_BE_WORSE;
+      need_flag = true;
+      nearest_need_new++;
+    }
+    else
+      nearest_real_success++;
     *zone_out = allocated_zone;
   }
 
