@@ -12,8 +12,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mntent.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <set>
@@ -29,7 +31,26 @@
 #include "util/coding.h"
 #include "util/crc32c.h"
 
-#define DEFAULT_ZENV_LOG_PATH "/home/afschy/RocksDB-Wrapper/"
+static std::string GetZenvLogPath() {
+  // /proc/self/loginuid holds the original login UID across sudo/su escalations
+  FILE* f = fopen("/proc/self/loginuid", "r");
+  if (f) {
+    uid_t loginuid = (uid_t)-1;
+    bool ok = fscanf(f, "%u", &loginuid) == 1 && loginuid != (uid_t)-1;
+    fclose(f);
+    if (ok) {
+      struct passwd* pw = getpwuid(loginuid);
+      if (pw && pw->pw_dir)
+        return std::string(pw->pw_dir) + "/RocksDB-Wrapper/";
+    }
+  }
+  // Fallback: SUDO_USER, then current uid
+  const char* sudo_user = getenv("SUDO_USER");
+  struct passwd* pw =
+      sudo_user ? getpwnam(sudo_user) : getpwuid(getuid());
+  std::string home = (pw && pw->pw_dir) ? pw->pw_dir : "/tmp";
+  return home + "/RocksDB-Wrapper/";
+}
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -1536,7 +1557,7 @@ static std::string GetLogFilename(std::string bdev) {
   char buf[40];
 
   std::strftime(buf, sizeof(buf), "%Y-%m-%d_%H:%M:%S.log", log_start);
-  ss << DEFAULT_ZENV_LOG_PATH << std::string("zenfs_") << bdev << ".log";// << "_" << buf;
+  ss << GetZenvLogPath() << std::string("zenfs_") << bdev << ".log";// << "_" << buf;
 
   return ss.str();
 }

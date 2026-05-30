@@ -233,6 +233,7 @@ class ZonedBlockDevice {
 
   /// Mutex to acquire when accessing or modifying levelwise_file_list_.
   std::mutex levelwise_files_mtx_;
+  /// Mutex to acquire before taking file placement decisions to avoid race conditions
   std::mutex alloc_mutex_;
 
   std::map<std::string, std::shared_ptr<ZoneFile>> *files_ = nullptr;
@@ -269,6 +270,7 @@ class ZonedBlockDevice {
   std::string GetFilename();
   uint32_t GetBlockSize();
 
+  /// Resets all zones that don't contain any valid files, and whose capacity is full.
   IOStatus ResetUnusedIOZones(bool gc=false);
   void LogZoneStats();
   void LogZoneUsage();
@@ -340,11 +342,15 @@ class ZonedBlockDevice {
   /**
    * Tries to find the best open zone for the given ZoneFile.
    * Goes to the fallback policy if the primary policy fails.
+   * Goes to LIZA if even the fallback policy fails.
+   * Called from @ref AllocateIOZone .
    * @param[in] zonefile the zone file requesting a zone
    * @param[in] file_lifetime write lifetime hint for the file
-   * @param[out] best_diff_out the best match score found
+   * @param[out] best_diff_out the lifetime difference between zone_out and the file.
+   * If best_diff_out is set to LIFETIME_DIFF_NOT_GOOD, @ref AllocateIOZone will try to open a new zone for the file.
+   * If set to LIFETIME_DIFF_COULD_BE_WORSE, @ref AllocateIOZone will try to open a new zone if the open zone limit hasn't been reached.
    * @param[in,out] zone_out on entry, the previously held zone (used to detect change); on exit, the best matching zone
-   * @param[in] min_capacity minimum zone capacity required
+   * @param[in] min_capacity the minimum amount of free space the chosen zone needs to have.
    * @return IOStatus
    */
   IOStatus GetBestOpenZoneMatch(ZoneFile* zonefile,

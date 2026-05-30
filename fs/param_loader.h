@@ -1,16 +1,23 @@
 # pragma once
 #include <fstream>
+#include <pwd.h>
+#include <stdio.h>
 #include <string>
+#include <sys/types.h>
+#include <cstdint>
+#include <unistd.h>
 #include <unordered_map>
+#include <mutex>
 namespace ROCKSDB_NAMESPACE {
 
 /** Strategy for selecting which empty zone to open when a new zone is needed. */
 enum EmptyZoneAllocType {
-  kDefault,      ///< First available empty zone.
-  kSequential,   ///< Round-robin ordering across empty zones.
-  kRandom,       ///< Random empty zone selection.
-  kLeastWear,    ///< Empty zone with the lowest reset count (least wear).
-  kHotnessBased  ///< Wear-aware: low-wear zones for upper levels, high-wear for lower levels.
+  kDefault,           ///< First available empty zone.
+  kSequential,        ///< Round-robin ordering across empty zones.
+  kRandom,            ///< Random empty zone selection.
+  kLeastWear,         ///< Empty zone with the lowest reset count (least wear).
+  kHotnessBased,      ///< Wear-aware: low-wear zones for upper levels, high-wear for lower levels.
+  kUserDefinedAlloc,  ///< Space for the user to write their own new zone allocator implementation.
 };
 
 /** Strategy for choosing which open zone to place a newly created SST file in. */
@@ -28,12 +35,14 @@ enum PlacementPolicyType {
   kOverlapGrandchildren,      ///< Rank-based placement by byte overlap with level+2.
   kCompensatedSize,           ///< Rank-based placement by tombstone-adjusted file size.
   kOAZA,                      ///< Rank-based placement by byte overlap with level+1.
+  kUserDefinedPlacement,      ///< Space for the user to write their own file placement implementation.
 };
 
 /** Garbage collection algorithm used to reclaim space from zones with invalid data. */
 enum GCType {
-  kDefaultGC,   ///< Standard ZenFS garbage collector.
-  kImprovedGC,  ///< Enhanced GC with smarter zone selection.
+  kDefaultGC,       ///< Standard ZenFS garbage collector.
+  kImprovedGC,      ///< Enhanced GC with smarter zone selection.
+  kUserDefinedGC,   ///< Space for the user to write their own zone selector for GC
 };
 
 /** Holds all tunable ZenFS runtime parameters; populated at startup via LoadParamsFromFile(). */
@@ -46,7 +55,7 @@ struct ZenfsParamContainer {
   uint8_t real_zonekv = 1;
 
   uint64_t average_value_size = 4080;
-  
+
   uint8_t max_level = 1;
   std::mutex lock_max_level;
   uint8_t min_boundary = 2; ///< Levels <= this use the upper-level policy.
@@ -79,7 +88,7 @@ struct ZenfsParamContainer {
   uint32_t buffer_size_megabytes = 2;
   uint32_t buffer_count_max = 20;
 
-  std::string logname = "unizns_default.log";
+  std::string logname = "zarc_default.log";
 
   void LoadParamsFromFile() {
     static std::unordered_map<std::string, EmptyZoneAllocType>
@@ -88,7 +97,8 @@ struct ZenfsParamContainer {
         {"kSequential", kSequential},
         {"kRandom", kRandom},
         {"kLeastWear", kLeastWear},
-        {"kHotnessBased", kHotnessBased}
+        {"kHotnessBased", kHotnessBased},
+        {"kUserDefinedAlloc", kUserDefinedAlloc},
       };
 
     static std::unordered_map<std::string, PlacementPolicyType>
@@ -106,15 +116,37 @@ struct ZenfsParamContainer {
         {"kOverlapGrandchildren", kOverlapGrandchildren},
         {"kCompensatedSize", kCompensatedSize},
         {"kOAZA", kOAZA},
+        {"kUserDefinedPlacement", kUserDefinedPlacement},
       };
-    
+
     static std::unordered_map<std::string, GCType>
       gc_type_map = {
         {"kDefaultGC", kDefaultGC},
         {"kImprovedGC", kImprovedGC},
+        {"kUserDefinedGC", kUserDefinedGC},
       };
 
-    std::ifstream infile("/home/afschy/RocksDB-Wrapper/lib/rocksdb/plugin/zenfs/params.txt");
+    auto get_home = []() -> std::string {
+      FILE* f = fopen("/proc/self/loginuid", "r");
+      if (f) {
+        uid_t uid = (uid_t)-1;
+        bool ok = fscanf(f, "%u", &uid) == 1 && uid != (uid_t)-1;
+        fclose(f);
+        if (ok) {
+          struct passwd* pw = getpwuid(uid);
+          if (pw && pw->pw_dir) return std::string(pw->pw_dir);
+        }
+      }
+      const char* su = getenv("SUDO_USER");
+      struct passwd* pw = su ? getpwnam(su) : getpwuid(getuid());
+      return (pw && pw->pw_dir) ? std::string(pw->pw_dir) : "/tmp";
+    };
+    const char* env_path = getenv("ZENFS_PARAMS");
+    std::string param_file_path = env_path
+        ? std::string(env_path)
+        : get_home() + "/RocksDB-Wrapper/lib/rocksdb/plugin/zenfs/params.txt";
+    fprintf(stdout, "PARAM_FILE_PATH %s\n", param_file_path.c_str());
+    std::ifstream infile(param_file_path);
     std::string type, value;
 
     while(infile >> type >> value) {
@@ -127,7 +159,7 @@ struct ZenfsParamContainer {
 
       else if(type == "empty_zone_allocator" && empty_zone_allocator_map.find(value) != empty_zone_allocator_map.end())
         empty_zone_allocator = empty_zone_allocator_map[value];
-      
+
       else if(type == "upper_level_policy" && placement_policy_map.find(value) != placement_policy_map.end())
         upper_level_policy = placement_policy_map[value];
 
@@ -136,7 +168,7 @@ struct ZenfsParamContainer {
 
       else if(type == "lower_level_policy" && placement_policy_map.find(value) != placement_policy_map.end())
         lower_level_policy = placement_policy_map[value];
-      
+
       else if(type == "lower_level_policy_fallback" && placement_policy_map.find(value) != placement_policy_map.end())
         lower_level_policy_fallback = placement_policy_map[value];
 
