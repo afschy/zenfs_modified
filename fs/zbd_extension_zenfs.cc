@@ -657,7 +657,7 @@ ZonedBlockDevice::MatchTombstoneDensity(
       
     if ((z->used_capacity_ > 0) && !z->IsFull() &&
         z->capacity_ >= min_capacity) {
-      MappingPolicyType policy = z->policy_;
+      PlacementPolicyType policy = z->policy_;
       if (policy == kTombstoneDensity) {
         if (allocated_zone != nullptr) {
           s = allocated_zone->CheckRelease();
@@ -711,7 +711,7 @@ ZonedBlockDevice::MatchClusterTogether(
       
     if ((z->used_capacity_ > 0) && !z->IsFull() &&
         z->capacity_ >= min_capacity) {
-      MappingPolicyType policy = z->policy_;
+      PlacementPolicyType policy = z->policy_;
       if (policy == kClusterTogether) {
         if (allocated_zone != nullptr) {
           s = allocated_zone->CheckRelease();

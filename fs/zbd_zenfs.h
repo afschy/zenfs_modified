@@ -45,6 +45,7 @@ class ZenFSSnapshotOptions;
 class ZoneExtent;
 class ZoneFile;
 
+/** Wraps a raw buffer of zone report entries returned by the ZBD backend. */
 class ZoneList {
  private:
   void *data_;
@@ -58,6 +59,7 @@ class ZoneList {
   ~ZoneList() { free(data_); };
 };
 
+/** Represents a single sequential-write zone on the ZNS device, tracking its write pointer, capacity, lifetime hint, and busy state. */
 class Zone {
   ZonedBlockDevice *zbd_;
   ZonedBlockDeviceBackend *zbd_be_;
@@ -67,16 +69,16 @@ class Zone {
   explicit Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
                 std::unique_ptr<ZoneList> &zones, unsigned int idx);
 
-  uint64_t start_;
-  uint64_t capacity_; /* remaining capacity */
-  uint64_t max_capacity_;
-  uint64_t wp_; // logical address of where the next data will be put
+  uint64_t start_;  ///< Starting logical address of this zone
+  uint64_t capacity_; ///< Remaining capacity in bytes
+  uint64_t max_capacity_; ///< Maximum capacity in bytes
+  uint64_t wp_; ///< Logical address where the next data will be written.
   Env::WriteLifeTimeHint lifetime_;
   std::atomic<uint64_t> used_capacity_;
-  uint32_t reset_count_;  // incremented on each call to Reset()
-  uint32_t finish_count_; // incremented on each call to Finish()
-  MappingPolicyType policy_;  // the policy for the ZoneFile object that wrote to this zone first
-  int level_; // the level of the ZoneFile object that wrote to this zone first
+  uint32_t reset_count_;  ///< Incremented on each call to Reset().
+  uint32_t finish_count_; ///< Incremented on each call to Finish().
+  PlacementPolicyType policy_;  ///< Placement policy of the first ZoneFile that wrote to this zone.
+  int level_; ///< LSM level of the first ZoneFile that wrote to this zone.
   bool flag_gc_reset_ = false;
 
   IOStatus Reset();
@@ -114,7 +116,7 @@ class Zone {
   }
 };
 
-// Calls the underlying ZNS library to perform zone operations
+/** Abstract backend interface to the ZNS device library; performs raw zone resets, finishes, reads, and writes. */
 class ZonedBlockDeviceBackend {
  public:
   uint32_t block_sz_ = 0;
@@ -157,16 +159,21 @@ class ZonedBlockDeviceBackend {
   virtual ~ZonedBlockDeviceBackend(){};
 };
 
+/** Selects the underlying storage backend used by ZonedBlockDevice. */
 enum class ZbdBackendType {
   kBlockDev,
   kZoneFS,
 };
 
+/**
+ * Manages all zones on a ZNS device: zone allocation, file placement policies,
+ * garbage collection, space accounting, and per-level file tracking.
+ */
 class ZonedBlockDevice {
  private:
   std::unique_ptr<ZonedBlockDeviceBackend> zbd_be_;
-  std::vector<Zone *> io_zones;   // zones that are allowed to store SST/WAL files
-  std::vector<Zone *> meta_zones; // zones set aside for storing metadata
+  std::vector<Zone *> io_zones;   ///< Zones allowed to store SST/WAL files.
+  std::vector<Zone *> meta_zones; ///< Zones reserved for storing metadata.
   time_t start_time_;
   std::shared_ptr<Logger> logger_;
   uint32_t finish_threshold_ = 0;
@@ -183,8 +190,7 @@ class ZonedBlockDevice {
 
   std::atomic<long> active_io_zones_;
   std::atomic<long> open_io_zones_;
-  /* Protects zone_resuorces_  condition variable, used
-     for notifying changes in open_io_zones_ */
+  /// Protects the zone_resources_ condition variable; notifies changes in open_io_zones_.
   std::mutex zone_resources_mtx_;
   std::condition_variable zone_resources_;
   std::mutex zone_deferred_status_mutex_;
@@ -199,17 +205,18 @@ class ZonedBlockDevice {
 
   std::shared_ptr<ZenFSMetrics> metrics_;
 
-  // one list for each level
-  // the list contains pointers to each known file in the level
-  // pointers are sorted on the InternalKey string at ZoneFile::smallest_
+  /// Per-level lists of known ZoneFile pointers, sorted by ZoneFile::smallest_ InternalKey.
+  /// levelwise_file_list_[i] is a list of all files in level-i.
+  /// Each file is represented by a pointer to a ZoneFile object, which contains all file metadata.
+  /// The list is sorted in the same order as the LSM tree.
   std::vector< std::list< ZoneFile* > > levelwise_file_list_;
 
   void EncodeJsonZone(std::ostream &json_stream,
                       const std::vector<Zone *> zones);
 
  public:
-  uint64_t alloc_count_ = 0;    // how many times GetBestOpenZoneMatch() is called
-  uint64_t failure_count_ = 0;  // how many times the default policy is invoked by GetBestOpenZoneMatch()
+  uint64_t alloc_count_ = 0;    ///< Number of times GetBestOpenZoneMatch() has been called.
+  uint64_t failure_count_ = 0;  ///< Number of times the default policy was invoked by GetBestOpenZoneMatch().
   
   uint64_t total_reset_count_ = 0;
   uint64_t gc_reset_count_ = 0;
@@ -219,12 +226,12 @@ class ZonedBlockDevice {
   uint64_t nearest_got_new = 0;
   bool need_flag = false;
 
-  // Stores all new parameters for the platform, loaded from param_loader.h
+  /// All tunable platform parameters, loaded from param_loader.h.
   ZenfsParamContainer zenfs_parameters_;
-  FILE* logfile_;  // for minimal logs, mostly for the garbage collector
-  FILE* zonestate_logfile_; // for printing detailed zone states for all gc iterations
+  FILE* logfile_;  ///< Log file for minimal GC-related output.
+  FILE* zonestate_logfile_; ///< Log file for detailed zone state snapshots at each GC iteration.
 
-  // mutex to be acquired when accessing/modifying levelwise_file_list_
+  /// Mutex to acquire when accessing or modifying levelwise_file_list_.
   std::mutex levelwise_files_mtx_;
   std::mutex alloc_mutex_;
 
@@ -241,9 +248,16 @@ class ZonedBlockDevice {
 
   Zone *GetIOZone(uint64_t offset);
 
-  // Hands over a zone to the ZoneFile for writing data
-  // Tries to hand over an already open zone (File Placement Policy)
-  // If that's not possible/desirable, opens a new zone (New Zone Allocation Policy)
+  /**
+   * Hands over a zone to the ZoneFile for writing data.
+   * Tries to hand over an already open zone (File Placement Policy).
+   * If that's not possible/desirable, opens a new zone (New Zone Allocation Policy).
+   * @param[in] file_lifetime write lifetime hint for the requesting file
+   * @param[in] io_type IO type of the requesting file
+   * @param[out] out_zone receives the allocated zone
+   * @param[in] zonefile the zone file requesting a zone
+   * @return IOStatus
+   */
   IOStatus AllocateIOZone(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
                           Zone **out_zone, ZoneFile* zonefile);
   IOStatus AllocateMetaZone(Zone **out_meta_zone);
@@ -296,15 +310,17 @@ class ZonedBlockDevice {
   uint64_t GetGCBytesWritten() { return gc_bytes_written_.load(); };
   uint64_t GetFinishBytesWritten() { return finish_bytes_written_.load(); };
 
-  // Adds a new file to the appropriate level and position of levelwise_file_list_
-  // Called after the whole file is written
+  /// Adds a new file to the appropriate level and position of levelwise_file_list_.
+  /// Called after the whole file is written.
+  /// @param[in] zonefile_ptr pointer to the zone file to record
   void AddZoneFileRecord(ZoneFile* zonefile_ptr);
   void AddZoneFileRecordNoLock(ZoneFile* zonefile_ptr);
-  // Searches for and removes a particular file from levelwise_file_list_
-  // Called when a file is marked as deleted
+  /// Searches for and removes a particular file from levelwise_file_list_.
+  /// Called when a file is marked as deleted.
+  /// @param[in] zonefile_ptr pointer to the zone file to remove
   void RemoveZoneFileRecord(ZoneFile* zonefile_ptr);
   void RemoveZoneFileRecordNoLock(ZoneFile* zonefile_ptr);
-  // Re-computes the compensated file sizes for all recorded files
+  /// Re-computes the compensated file sizes for all recorded files.
   void RecomputeCompensatedFileSizes();
 
   uint64_t GetEmptyZoneCount();
@@ -321,30 +337,60 @@ class ZonedBlockDevice {
   IOStatus ApplyFinishThreshold();
   IOStatus FinishCheapestIOZone();
   
-  // Related to choosing the best existing zone for a ZoneFile object
-  // Tries to find the zone that best fits the given zonefile's policy
-  // Goes to the fallback policy if primary policy fails
+  /**
+   * Tries to find the best open zone for the given ZoneFile.
+   * Goes to the fallback policy if the primary policy fails.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[in,out] zone_out on entry, the previously held zone (used to detect change); on exit, the best matching zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus GetBestOpenZoneMatch(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
 
-  // Implementations of all File Placement policies
-  // ZenFS default, tries to put the file in a zone with equal or higher lifetime
-  // Levels 0 and 1 have WLTH_MEDIUM, level-2 has WLTH_LONG, levels 3 and onward have WLTH_EXTREME
-  // RocksDB assigns those before writing
+  /**
+   * ZenFS default file placement policy.
+   * Tries to put the file in a zone with equal or higher write lifetime hint.
+   * Levels 0-1 map to WLTH_MEDIUM, level 2 to WLTH_LONG, levels 3+ to WLTH_EXTREME.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[out] zone_out the matched zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus MatchLifetimeBased(ZoneFile* zonefile,
                               Env::WriteLifeTimeHint file_lifetime,
                               unsigned int *best_diff_out, Zone **zone_out,
                               uint32_t min_capacity = 0);
-  // Looks for files with overlapping keyranges in the upper and lower level
-  // Chooses the zone that holds the most amount of data from the overlapping files
+  /**
+   * Looks for files with overlapping key ranges in the upper and lower level.
+   * Chooses the zone that holds the most data from the overlapping files.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[out] zone_out the matched zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus MatchCAZA(ZoneFile* zonefile,
                       Env::WriteLifeTimeHint file_lifetime,
                       unsigned int *best_diff_out, Zone **zone_out,
                       uint32_t min_capacity = 0);
-  // Chooses the zone that holds the most data from adjacent files
-  // Closer files have higher weight compared to farther files
+  /**
+   * Chooses the zone that holds the most data from adjacent same-level files.
+   * Closer files (by key range) have higher weight than farther files.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[out] zone_out the matched zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus MatchSameLevelNearbyKeys(ZoneFile* zonefile,
                                     Env::WriteLifeTimeHint file_lifetime,
                                     unsigned int *best_diff_out, Zone **zone_out,
@@ -353,41 +399,79 @@ class ZonedBlockDevice {
                                           Env::WriteLifeTimeHint file_lifetime,
                                           unsigned int *best_diff_out, Zone **zone_out,
                                           uint32_t min_capacity = 0);
-  // Fills a zone in order of arrival (per-level)
+  /// Fills a zone in order of file arrival, per level.
+  /// @param[in] zonefile the zone file requesting a zone
+  /// @param[in] file_lifetime write lifetime hint for the file
+  /// @param[out] best_diff_out the best match score found
+  /// @param[out] zone_out the matched zone
+  /// @param[in] min_capacity minimum zone capacity required
+  /// @return IOStatus
   IOStatus MatchArrivalTimeBased(ZoneFile* zonefile,
                                   Env::WriteLifeTimeHint file_lifetime,
                                   unsigned int *best_diff_out, Zone **zone_out,
                                   uint32_t min_capacity = 0);
-  // Puts files that exceed the given tombstone ratio (tunable parameter) into a special zone
+  /// Puts files whose tombstone ratio exceeds the tunable threshold into a dedicated zone.
+  /// @param[in] zonefile the zone file requesting a zone
+  /// @param[in] file_lifetime write lifetime hint for the file
+  /// @param[out] best_diff_out the best match score found
+  /// @param[out] zone_out the matched zone (set to nullptr if the file does not qualify)
+  /// @param[in] min_capacity minimum zone capacity required
+  /// @return IOStatus
   IOStatus MatchTombstoneDensity(ZoneFile* zonefile,
                                   Env::WriteLifeTimeHint file_lifetime,
                                   unsigned int *best_diff_out, Zone **zone_out,
                                   uint32_t min_capacity = 0);
-  // Placeholder, forwards to MatchLifetimeBased
+  /// Placeholder policy that forwards directly to MatchLifetimeBased.
   IOStatus MatchTombstoneTTL(ZoneFile* zonefile,
                               Env::WriteLifeTimeHint file_lifetime,
                               unsigned int *best_diff_out, Zone **zone_out,
                               uint32_t min_capacity = 0);
-  // Puts all files with the kClusterTogether policy in the same zone, doesn't consider any other factor
+  /// Puts all files with the kClusterTogether policy in the same zone, ignoring all other factors.
+  /// @param[in] zonefile the zone file requesting a zone
+  /// @param[in] file_lifetime write lifetime hint for the file
+  /// @param[out] best_diff_out the best match score found
+  /// @param[out] zone_out the matched zone
+  /// @param[in] min_capacity minimum zone capacity required
+  /// @return IOStatus
   IOStatus MatchClusterTogether(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
-  // Creates a ranking of all files in a level based on how much a file overlaps with level+1
-  // Tries to put the new file in the same zone with similar-ranked files in its level
-  // Closer files (rankwise) have higher weight than farther files
+  /**
+   * Ranks files in a level by overlap with level+1, then co-locates the new file
+   * with similarly-ranked peers. Closer files (rank-wise) have higher weight.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[out] zone_out the matched zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus MatchOverlapChildren(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
                                 uint32_t min_capacity = 0);
-  // Same as MatchOverlapChildren, but for level+2
+  /// Same as MatchOverlapChildren, but ranks by overlap with level+2.
+  /// @param[in] zonefile the zone file requesting a zone
+  /// @param[in] file_lifetime write lifetime hint for the file
+  /// @param[out] best_diff_out the best match score found
+  /// @param[out] zone_out the matched zone
+  /// @param[in] min_capacity minimum zone capacity required
+  /// @return IOStatus
   IOStatus MatchOverlapGrandchildren(ZoneFile* zonefile,
                                       Env::WriteLifeTimeHint file_lifetime,
                                       unsigned int *best_diff_out, Zone **zone_out,
                                       uint32_t min_capacity = 0);
-  // Creates a ranking of all files in a level based on compensated file size
-  // Tries to put the new file in the same zone with similar-ranked files in its level
-  // Closer files (rankwise) have higher weight than farther files
+  /**
+   * Ranks files in a level by compensated file size, then co-locates the new file
+   * with similarly-ranked peers. Closer files (rank-wise) have higher weight.
+   * @param[in] zonefile the zone file requesting a zone
+   * @param[in] file_lifetime write lifetime hint for the file
+   * @param[out] best_diff_out the best match score found
+   * @param[out] zone_out the matched zone
+   * @param[in] min_capacity minimum zone capacity required
+   * @return IOStatus
+   */
   IOStatus MatchCompensatedSize(ZoneFile* zonefile,
                                 Env::WriteLifeTimeHint file_lifetime,
                                 unsigned int *best_diff_out, Zone **zone_out,
@@ -415,61 +499,101 @@ class ZonedBlockDevice {
                                         std::map<uint64_t, uint64_t> &contribution_map,
                                         uint32_t min_capacity = 0);
   
-  // Related to the allocation of a new empty zone when needed
-  // Only relevant when static zone-to-block mapping is used in the underlying ZNS SSD
+  /**
+   * Allocates a new empty zone. Only relevant when the underlying ZNS SSD uses
+   * static zone-to-block mapping.
+   * @param[out] zone_out receives the allocated empty zone
+   * @param[in] level the level of the file requesting a zone; influences zone selection policy
+   * @return IOStatus
+   */
   IOStatus AllocateEmptyZone(Zone **zone_out, int level=-1);
-  // Hands over the first empty zone
+  /// Hands over the first available empty zone.
+  /// @param[out] zone_out receives the allocated empty zone
+  /// @return IOStatus
   IOStatus AllocateEmptyZoneDefault(Zone **zone_out);
-  // Round-robin allocation
+  /// Allocates an empty zone using round-robin ordering.
+  /// @param[out] zone_out receives the allocated empty zone
+  /// @return IOStatus
   IOStatus AllocateEmptyZoneSequential(Zone **zone_out);
   IOStatus AllocateEmptyZoneRandom(Zone **zone_out);
-  // Greedily chooses the zone with the least reset count
+  /// Greedily allocates the empty zone with the lowest reset count (least wear).
+  /// @param[out] zone_out receives the allocated empty zone
+  /// @return IOStatus
   IOStatus AllocateEmptyZoneLeastWear(Zone **zone_out);
-  // Puts lower-level files on high-wear zones, since those files get deleted more infrequently
-  // Puts upper-level files on low-wear zones for the opposite reason
+  /**
+   * Wear-aware allocation: places lower-level files on high-wear zones (since they are
+   * deleted less frequently) and upper-level files on low-wear zones for the opposite reason.
+   * @param[out] zone_out receives the allocated empty zone
+   * @param[in] level the level of the file requesting a zone
+   * @return IOStatus
+   */
   IOStatus AllocateEmptyZoneHotnessBased(Zone **zone_out, int level);
 
-  // levelwise_files_mtx_ must be held before calling
-  // Returns a vector of pointers to files that overlap with zonefile_ptr in a target_level
+  /// Returns all files in @p target_level whose key range overlaps with @p zonefile_ptr.
+  /// @pre levelwise_files_mtx_ must be held by the caller
+  /// @param[in,out] ret_container container to append overlapping file pointers into; existing content is preserved
+  /// @param[in] zonefile_ptr the file whose key range is used for overlap detection
+  /// @param[in] target_level the level to search
   void GetOverlappingFiles(std::vector<ZoneFile*>& ret_container, ZoneFile* zonefile_ptr, int target_level);
-  // Returns a vector of pointers to all files in target_level
+  /// Returns pointers to all files at @p target_level.
+  /// @param[out] ret_container cleared and filled with all file pointers from the target level
+  /// @param[in] target_level the level to retrieve files from
   void GetSameLevelFiles(std::vector<ZoneFile*>& ret_container, int target_level);
-  // Returns the total number of files that overlap with zonefile_ptr in target_level
+  /// @return number of files in @p target_level whose key range overlaps with @p zonefile_ptr
   uint64_t GetOverlapFileCount(ZoneFile* zonefile_ptr, int target_level);
-  // Returns the total number of bytes across files that overlap with zonefile_ptr in target_level
+  /// @return total bytes across overlapping files in @p target_level
   uint64_t GetOverlapByteCount(ZoneFile* zonefile_ptr, int target_level);
-  // Returns the total number of keys across files that overlap with zonefile_ptr in target_level
+  /// @return total key count across overlapping files in @p target_level
   uint64_t GetOverlapKeyCount(ZoneFile* zonefile_ptr, int target_level);
-  // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
+  /// Ranks files in @p container by overlap size with @p target_level; sorts in-place and sets each file's rank_ field.
+  /// @param[in,out] container files to rank; sorted in ascending rank order on return, rank_ fields updated
+  /// @param[in] own_level the level whose files are being ranked
+  /// @param[in] target_level the level used to compute overlap size for ranking
   void OverlapRankHelperSizeBased(std::vector<ZoneFile*>& container, int own_level, int target_level);
-  // container (output) is a list of ZoneFile pointers, sorted by its compaction rank
+  /// Ranks files in @p container by overlap key count with @p target_level; sorts in-place and sets each file's rank_ field.
+  /// @param[in,out] container files to rank; sorted in ascending rank order on return, rank_ fields updated
+  /// @param[in] own_level the level whose files are being ranked
+  /// @param[in] target_level the level used to compute overlap key count for ranking
   void OverlapRankHelperKeyBased(std::vector<ZoneFile*>& container, int own_level, int target_level);
-  // Returns true if the given files overlap
+  /// @return true if @p a and @p b have overlapping key ranges
   bool IsOverlapping(ZoneFile* a, ZoneFile* b, InternalKeyComparator& icmp);
-  // Returns true if the ratio of tombstones in the given file is higher than the threshold
+  /// @return true if the tombstone ratio of @p zonefile_ptr exceeds the configured threshold
   bool IsHighTombstone(ZoneFile* zonefile_ptr);
 
-  // result (output) contains the amount of data each zone holds from the given file(s)
-  // the map's key is a zone's first address, and the value is how many bytes of data from the file(s) that zone holds
-  // factor is multiplied with the byte count for the file(s), used for giving different weights to different files
+  /**
+   * Computes how many bytes from the given files each zone holds.
+   * @param[in] files input files to measure
+   * @param[in,out] result map accumulating results: zone start address → weighted byte count; existing entries are incremented
+   * @param[in] factor weight multiplier applied to each file's byte count; use to give different files different weights
+   */
   void GetPerZoneContribution(std::vector<ZoneFile*>& files, std::map<uint64_t, uint64_t>& result, double factor=1.0);
+  /**
+   * @overload Single-file variant.
+   * @param[in] zonefile single input file to measure
+   * @param[in,out] result map accumulating results: zone start address → weighted byte count; existing entries are incremented
+   * @param[in] factor weight multiplier applied to the file's byte count
+   */
   void GetPerZoneContribution(ZoneFile* zonefile, std::map<uint64_t, uint64_t>& result, double factor=1.0);
 
-  MappingPolicyType GetPolicy(int level) {
+  PlacementPolicyType GetPolicy(int level) {
     if(level < 0) return kLifetimeBased;
     if(level <= zenfs_parameters_.min_boundary) return zenfs_parameters_.upper_level_policy;
     if(level >= zenfs_parameters_.max_boundary) return zenfs_parameters_.lower_level_policy;
     return zenfs_parameters_.middle_level_policy;
   }
 
-  MappingPolicyType GetSecondaryPolicy(int level) {
+  PlacementPolicyType GetSecondaryPolicy(int level) {
     if(level < 0) return kLifetimeBased;
     if(level <= zenfs_parameters_.min_boundary) return zenfs_parameters_.upper_level_policy_fallback;
     if(level >= zenfs_parameters_.max_boundary) return zenfs_parameters_.lower_level_policy_fallback;
     return zenfs_parameters_.middle_level_policy_fallback;
   }
 
-  // Used by MatchLifetimeBased
+  /// Returns a score indicating how well @p zone_lifetime matches @p file_lifetime.
+  /// A lower score is a better match; LIFETIME_DIFF_NOT_GOOD indicates an unsuitable zone.
+  /// @param[in] zone_lifetime the zone's current write lifetime hint
+  /// @param[in] file_lifetime the file's write lifetime hint
+  /// @return match score (0 = exact match, LIFETIME_DIFF_NOT_GOOD = unsuitable)
   static unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
                                       Env::WriteLifeTimeHint file_lifetime) {
     assert(file_lifetime <= Env::WLTH_EXTREME);
@@ -490,7 +614,8 @@ class ZonedBlockDevice {
   }
 };
 
-class ZoneExtent {  // part of a file in a specific zone
+/** Describes a contiguous byte range of a logical file that resides in a single zone. */
+class ZoneExtent {
  public:
   uint64_t start_;
   uint64_t length_;
@@ -505,30 +630,33 @@ class ZoneExtent {  // part of a file in a specific zone
 
 class ZoneFile;
 
-/* Interface for persisting metadata for files */
+/** Interface for durably persisting a ZoneFile's extent metadata to the ZenFS superblock. */
 class MetadataWriter {
  public:
   virtual ~MetadataWriter();
   virtual IOStatus Persist(ZoneFile* zoneFile) = 0;
 };
 
+/**
+ * Represents a logical file stored across one or more zone extents.
+ * Tracks key ranges, LSM level, tombstone statistics, and the active write zone.
+ */
 class ZoneFile {
  private:
   const uint64_t NO_EXTENT = 0xffffffffffffffff;
 
   ZonedBlockDevice* zbd_;
 
-  std::vector<ZoneExtent*> extents_;  // parts of a file can be spread across multiple zones
+  std::vector<ZoneExtent*> extents_;  ///< File extents; a file may span multiple zones.
   std::vector<std::string> linkfiles_;
 
-  // the zone the file will be put, as long as there is enough space
-  // nullptr by default, allocated using AllocateIOZone when needed
+  /// Current write zone; nullptr until allocated via AllocateIOZone().
   Zone* active_zone_;
   uint64_t extent_start_ = NO_EXTENT;
   uint64_t extent_filepos_ = 0;
 
   Env::WriteLifeTimeHint lifetime_;
-  IOType io_type_; /* Only used when writing, for SST files value should be kData */
+  IOType io_type_; ///< IO type; only meaningful during writes — kData for SST files.
   uint64_t file_size_;
   uint64_t file_id_;
 
@@ -547,11 +675,10 @@ class ZoneFile {
 
  public:
 
-  // the level, and the smallest and largest keys of the SST file
-  int level_ = -1;
-  InternalKey smallest_;
-  InternalKey largest_;
-  InternalKeyComparator icmp_;
+  int level_ = -1;              ///< LSM level of this SST file (-1 if unset).
+  InternalKey smallest_;        ///< Smallest internal key in this file.
+  InternalKey largest_;         ///< Largest internal key in this file.
+  InternalKeyComparator icmp_;  ///< Comparator for internal keys.
 
   uint64_t num_entries_ = 0;
   uint64_t num_deletions_ = 0;
@@ -562,13 +689,13 @@ class ZoneFile {
   SequenceNumber smallest_seqno_ = kMaxSequenceNumber;
   SequenceNumber largest_seqno_ = 0;
   
-  bool has_keys_ = false; // set to true on the first call to UpdateInternalKeys or UpdateInternalKeysRange
+  bool has_keys_ = false; ///< True after the first call to UpdateInternalKeys() or UpdateInternalKeysRange().
   bool is_recorded_ = false;
   uint64_t key_update_count_ = 0;
   uint64_t key_update_post_alloc_count_ = 0;
 
   uint64_t rank_ = 100000;
-  uint64_t alloc_size_ = 0; // used for non-fragmented zone allocation
+  uint64_t alloc_size_ = 0; ///< Allocation size hint for non-fragmented zone allocation.
 
   static const int SPARSE_HEADER_SIZE = 8;
 
@@ -656,8 +783,8 @@ class ZoneFile {
   void ReleaseActiveZone();
   void SetActiveZone(Zone* zone);
   IOStatus CloseActiveZone();
-  // Adds the record of this file to the container in ZonedBlockDevice
-  // called in CloseWR()
+  /// Adds or updates this file's record in ZonedBlockDevice's levelwise_file_list_.
+  /// Called from CloseWR().
   void CreateOrUpdateRecord();
 
  public:

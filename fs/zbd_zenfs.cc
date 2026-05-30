@@ -635,7 +635,7 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   
   // function pointer type that can hold any instance of a Match.* function
   typedef IOStatus (ZonedBlockDevice::*MatchFunctionType)(ZoneFile* zonefile, Env::WriteLifeTimeHint file_lifetime, unsigned int *best_diff_out, Zone **zone_out, uint32_t min_capacity);
-  static std::unordered_map<MappingPolicyType, MatchFunctionType>
+  static std::unordered_map<PlacementPolicyType, MatchFunctionType>
   function_map = {
     {kLifetimeBased, &ZonedBlockDevice::MatchLifetimeBased},
     {kCAZA, &ZonedBlockDevice::MatchCAZA},
@@ -651,8 +651,8 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
     {kOAZA, &ZonedBlockDevice::MatchOAZA},
   };
 
-  MappingPolicyType primary_policy;
-  MappingPolicyType fallback_policy;
+  PlacementPolicyType primary_policy;
+  PlacementPolicyType fallback_policy;
   if(zonefile->level_ <= zenfs_parameters_.min_boundary) {
     primary_policy = zenfs_parameters_.upper_level_policy;
     fallback_policy = zenfs_parameters_.upper_level_policy_fallback;

@@ -4,35 +4,39 @@
 #include <unordered_map>
 namespace ROCKSDB_NAMESPACE {
 
-enum EmptyZoneAllocType { // When an empty zone is needed, how is it chosen from all available zones?
-  kDefault,
-  kSequential,
-  kRandom,
-  kLeastWear,
-  kHotnessBased
+/** Strategy for selecting which empty zone to open when a new zone is needed. */
+enum EmptyZoneAllocType {
+  kDefault,      ///< First available empty zone.
+  kSequential,   ///< Round-robin ordering across empty zones.
+  kRandom,       ///< Random empty zone selection.
+  kLeastWear,    ///< Empty zone with the lowest reset count (least wear).
+  kHotnessBased  ///< Wear-aware: low-wear zones for upper levels, high-wear for lower levels.
 };
 
-enum MappingPolicyType {  // In which zone to put a newly created file
-  kLifetimeBased, // ZenFS default, no change
-  kLeveledLifetimeBased,  // The version of LIZA found in the ZoneKV paper as a fallback
-  kCAZA, // Files are put in the same zones as other files in neighboring level with overlapping keyranges
-  kSameLevelNearbyKeys, // Nearest
-  kSameLevelNearbyKeysSimple, // Nearest simplified
-  kArrivalTimeBased, // Files are put in order of arrival per level, greedily filling up available zones, ZoneKV
-  kTombstoneDensity, // Files having tombstone densities higher than a threshold go to a dedicated zone
-  kTombstoneTTL, // Files having similar TTL should go to the same zones
-  kClusterTogether, // Try to put everything in the same zone, full naive
-  kOverlapChildren, // Rank based mapping based on overlap with level-i+1, expanded version
-  kOverlapGrandchildren, // Rank based mapping based on overlap with level-i+2
-  kCompensatedSize, // Rank based mapping based on file sizes adjusted for tombstones
-  kOAZA, // Rank based mapping based on overlap with level-i+1
+/** Strategy for choosing which open zone to place a newly created SST file in. */
+enum PlacementPolicyType {
+  kLifetimeBased,             ///< ZenFS default; places files by write lifetime hint.
+  kLeveledLifetimeBased,      ///< LIZA variant from the ZoneKV paper; used as a fallback.
+  kCAZA,                      ///< Co-locates with neighboring-level files that have overlapping key ranges.
+  kSameLevelNearbyKeys,       ///< Co-locates with the nearest same-level files by key range (weighted).
+  kSameLevelNearbyKeysSimple, ///< Simplified nearest same-level key range variant.
+  kArrivalTimeBased,          ///< Fills zones in file-arrival order per level (ZoneKV).
+  kTombstoneDensity,          ///< Routes high-tombstone-density files to a dedicated zone.
+  kTombstoneTTL,              ///< Co-locates files with similar TTL.
+  kClusterTogether,           ///< Puts all files into the same zone; naive baseline.
+  kOverlapChildren,           ///< Rank-based placement by byte overlap with level+1 (expanded).
+  kOverlapGrandchildren,      ///< Rank-based placement by byte overlap with level+2.
+  kCompensatedSize,           ///< Rank-based placement by tombstone-adjusted file size.
+  kOAZA,                      ///< Rank-based placement by byte overlap with level+1.
 };
 
+/** Garbage collection algorithm used to reclaim space from zones with invalid data. */
 enum GCType {
-  kDefaultGC,
-  kImprovedGC,
+  kDefaultGC,   ///< Standard ZenFS garbage collector.
+  kImprovedGC,  ///< Enhanced GC with smarter zone selection.
 };
 
+/** Holds all tunable ZenFS runtime parameters; populated at startup via LoadParamsFromFile(). */
 struct ZenfsParamContainer {
   double nearest_newzone_threshold = 0.0;
 
@@ -45,32 +49,32 @@ struct ZenfsParamContainer {
   
   uint8_t max_level = 1;
   std::mutex lock_max_level;
-  uint8_t min_boundary = 2; // levels <= this will follow a special policy
-  uint8_t max_boundary = 6; // levels >= this will follow a special policy
+  uint8_t min_boundary = 2; ///< Levels <= this use the upper-level policy.
+  uint8_t max_boundary = 6; ///< Levels >= this use the lower-level policy.
 
   double tombstone_density = 0.5;
 
-  MappingPolicyType upper_level_policy = kClusterTogether; // for levels <= min_boundary
-  MappingPolicyType upper_level_policy_fallback = kClusterTogether;
+  PlacementPolicyType upper_level_policy = kClusterTogether;          ///< Primary policy for levels <= min_boundary.
+  PlacementPolicyType upper_level_policy_fallback = kClusterTogether; ///< Fallback policy for levels <= min_boundary.
 
-  MappingPolicyType lower_level_policy = kClusterTogether; // for levels >= max_boundary
-  MappingPolicyType lower_level_policy_fallback = kClusterTogether;
+  PlacementPolicyType lower_level_policy = kClusterTogether;          ///< Primary policy for levels >= max_boundary.
+  PlacementPolicyType lower_level_policy_fallback = kClusterTogether; ///< Fallback policy for levels >= max_boundary.
 
-  MappingPolicyType middle_level_policy = kClusterTogether; // for all other levels
-  MappingPolicyType middle_level_policy_fallback = kClusterTogether;
-  // MappingPolicyType fallback_policy = kLifetimeBased; // When a specific policy can't be applied
+  PlacementPolicyType middle_level_policy = kClusterTogether;          ///< Primary policy for all other levels.
+  PlacementPolicyType middle_level_policy_fallback = kClusterTogether; ///< Fallback policy for all other levels.
+  // PlacementPolicyType fallback_policy = kLifetimeBased; // When a specific policy can't be applied
 
-  uint8_t fragmentation_enabled = 1;  // Let a file be spread across multiple zones
+  uint8_t fragmentation_enabled = 1; ///< When non-zero, allows a file to span multiple zones.
 
   GCType gc_type = kDefaultGC;
-  uint64_t gc_start_level = 20; // GC kicks in when free space is lower than this percentage
+  uint64_t gc_start_level = 20; ///< GC activates when free space falls below this percentage.
   //TODO: gc trigger based on invalid amount of data per zone and/or capacity percentage per zone
   //can mix the two potentially
-  uint64_t gc_stop_level = 25;  // Stop GC when this level is reached
-  uint64_t gc_slope = 3; // GC aggresiveness
-  uint64_t gc_pause_seconds = 10; // The interval in seconds between GC activations
-  uint8_t cold_migration = 0; // Move long-lived files from low-wear to high-wear zones
-  uint64_t reserve_zone_count = 10;  // Keep some zone off-limits unless absolutely necessary
+  uint64_t gc_stop_level = 25;  ///< GC stops when free space recovers to this percentage.
+  uint64_t gc_slope = 3;        ///< GC aggressiveness multiplier.
+  uint64_t gc_pause_seconds = 10; ///< Interval in seconds between successive GC activations.
+  uint8_t cold_migration = 0;     ///< When non-zero, migrates long-lived files from low-wear to high-wear zones.
+  uint64_t reserve_zone_count = 10; ///< Number of zones held in reserve; only used when no other zones are available.
 
   uint32_t buffer_size_megabytes = 2;
   uint32_t buffer_count_max = 20;
@@ -87,8 +91,8 @@ struct ZenfsParamContainer {
         {"kHotnessBased", kHotnessBased}
       };
 
-    static std::unordered_map<std::string, MappingPolicyType>
-      mapping_policy_map = {
+    static std::unordered_map<std::string, PlacementPolicyType>
+      placement_policy_map = {
         {"kLifetimeBased", kLifetimeBased},
         {"kLeveledLifetimeBased", kLeveledLifetimeBased},
         {"kCAZA", kCAZA},
@@ -124,26 +128,26 @@ struct ZenfsParamContainer {
       else if(type == "empty_zone_allocator" && empty_zone_allocator_map.find(value) != empty_zone_allocator_map.end())
         empty_zone_allocator = empty_zone_allocator_map[value];
       
-      else if(type == "upper_level_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        upper_level_policy = mapping_policy_map[value];
+      else if(type == "upper_level_policy" && placement_policy_map.find(value) != placement_policy_map.end())
+        upper_level_policy = placement_policy_map[value];
 
-      else if(type == "upper_level_policy_fallback" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        upper_level_policy_fallback = mapping_policy_map[value];
+      else if(type == "upper_level_policy_fallback" && placement_policy_map.find(value) != placement_policy_map.end())
+        upper_level_policy_fallback = placement_policy_map[value];
 
-      else if(type == "lower_level_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        lower_level_policy = mapping_policy_map[value];
+      else if(type == "lower_level_policy" && placement_policy_map.find(value) != placement_policy_map.end())
+        lower_level_policy = placement_policy_map[value];
       
-      else if(type == "lower_level_policy_fallback" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        lower_level_policy_fallback = mapping_policy_map[value];
+      else if(type == "lower_level_policy_fallback" && placement_policy_map.find(value) != placement_policy_map.end())
+        lower_level_policy_fallback = placement_policy_map[value];
 
-      else if(type == "middle_level_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        middle_level_policy = mapping_policy_map[value];
+      else if(type == "middle_level_policy" && placement_policy_map.find(value) != placement_policy_map.end())
+        middle_level_policy = placement_policy_map[value];
 
-      else if(type == "middle_level_policy_fallback" && mapping_policy_map.find(value) != mapping_policy_map.end())
-        middle_level_policy_fallback = mapping_policy_map[value];
+      else if(type == "middle_level_policy_fallback" && placement_policy_map.find(value) != placement_policy_map.end())
+        middle_level_policy_fallback = placement_policy_map[value];
 
-      // else if(type == "fallback_policy" && mapping_policy_map.find(value) != mapping_policy_map.end())
-      //   fallback_policy = mapping_policy_map[value];
+      // else if(type == "fallback_policy" && placement_policy_map.find(value) != placement_policy_map.end())
+      //   fallback_policy = placement_policy_map[value];
 
       else if(type == "average_value_size") {
         int value_int = std::stoi(value);
