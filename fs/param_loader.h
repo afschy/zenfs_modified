@@ -53,6 +53,7 @@ struct ZenfsParamContainer {
   uint8_t real_caza = 1;
   uint8_t real_oaza = 1;
   uint8_t real_zonekv = 1;
+  uint8_t dynamic_level_adjustment = 1; ///< When the file composition of a zone changes, its level label will also change.
 
   uint64_t average_value_size = 4080;
 
@@ -239,6 +240,14 @@ struct ZenfsParamContainer {
         int value_int = std::stoi(value);
         if(value_int == 0 || value_int == 1)
           real_zonekv = value_int;
+      }
+
+      else if(type == "dynamic_level_adjustment") {
+        int value_int = std::stoi(value);
+        if(value_int)
+          dynamic_level_adjustment = 1;
+        else
+          dynamic_level_adjustment = 0;
       }
 
       else if(type == "min_boundary") {

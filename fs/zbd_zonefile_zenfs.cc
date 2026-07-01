@@ -294,6 +294,7 @@ void ZoneFile::ClearExtents() {
 
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
+    zone->UpdateBytesOfLevel((*e)->level_, -(*e)->length_);
     delete *e;
   }
   extents_.clear();
@@ -507,6 +508,7 @@ void ZoneFile::PushExtent() {
   active_zone_->used_capacity_ += length;
   extent_start_ = active_zone_->wp_;
   extent_filepos_ = file_size_;
+  active_zone_->UpdateBytesOfLevel(level_, length);
 }
 
 IOStatus ZoneFile::AllocateNewZone() {
@@ -820,8 +822,11 @@ IOStatus ZoneFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime) {
 
 void ZoneFile::SetLevel(int level) {
   level_ = level;
-  for(const auto& ext: extents_)
+  for(const auto& ext: extents_) {
+    ext->zone_->UpdateBytesOfLevel(ext->level_, -ext->length_);
     ext->level_ = level;
+    ext->zone_->UpdateBytesOfLevel(ext->level_, ext->length_);
+  }
 }
 
 void ZoneFile::UpdateInternalKeys(const Slice& key, SequenceNumber seqno) {

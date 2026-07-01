@@ -65,15 +65,33 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   reset_count_ = 0;
   finish_count_ = 0;
   policy_ = kLifetimeBased;
+  bytes_of_level.resize(5, 0);
   level_ = -1;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
 }
 
-bool Zone::IsUsed() { return (used_capacity_ > 0); }
+void Zone::UpdateBytesOfLevel(int level, int bytes) {
+  if (!zbd_->zenfs_parameters_.dynamic_level_adjustment || level < 0) return;
+  if (level >= (int)bytes_of_level.size()) bytes_of_level.resize(level+1, 0);
+
+  bytes_of_level[level] += bytes;
+  if (bytes_of_level[level] < 0) bytes_of_level[level] = 0;
+
+  int chosen_level = level_;
+  for(uint8_t i=0; i<bytes_of_level.size(); i++) {
+    if (bytes_of_level[i] > bytes_of_level[chosen_level])
+      chosen_level = i;
+  }
+
+  level_ = chosen_level;
+  policy_ = zbd_->GetPolicy(level_);
+}
+
+bool Zone::IsUsed() { return (used_capacity_ > 0 || open_); }
 uint64_t Zone::GetCapacityLeft() { return capacity_; }
 bool Zone::IsFull() { return (capacity_ == 0); }
-bool Zone::IsEmpty() { return (wp_ == start_); }
+bool Zone::IsEmpty() { return (wp_ == start_ && !open_); }
 uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
 
 void Zone::EncodeJson(std::ostream &json_stream) {
@@ -107,6 +125,9 @@ IOStatus Zone::Reset() {
   wp_ = start_;
   lifetime_ = Env::WLTH_NOT_SET;
   reset_count_++;
+  level_ = -1;
+  open_ = false;
+  for (uint8_t i=0; i<bytes_of_level.size(); i++) bytes_of_level[i] = 0;
 
   return IOStatus::OK();
 }
@@ -120,6 +141,7 @@ IOStatus Zone::Finish() {
   capacity_ = 0;
   wp_ = start_ + zbd_->GetZoneSize();
   finish_count_++;
+  open_ = false;
 
   return IOStatus::OK();
 }
@@ -127,6 +149,7 @@ IOStatus Zone::Finish() {
 IOStatus Zone::Close() {
   assert(IsBusy());
 
+  open_ = false;
   if (!(IsEmpty() || IsFull())) {
     IOStatus ios = zbd_be_->Close(start_);
     if (ios != IOStatus::OK()) return ios;
@@ -422,6 +445,41 @@ void ZonedBlockDevice::LogDetailedZoneState() {
   fflush(zonestate_logfile_);
 }
 
+void ZonedBlockDevice::LogLevelwiseZoneStats() {
+  int level_count = zenfs_parameters_.max_level;
+  std::vector<std::vector<Zone*>> open_zones(level_count+1), closed_zones(level_count+1);
+  
+  for (Zone* z : io_zones) {
+    bool open = (z->used_capacity_ > 0 || z->open_) && !z->IsFull();
+    if (open && z->level_ >= 0 && z->level_ <= level_count) open_zones[z->level_].push_back(z);
+
+    bool closed = z->capacity_ == 0;
+    if (closed && z->level_ >= 0 && z->level_ <= level_count) closed_zones[z->level_].push_back(z);
+  }
+
+  fprintf(zonestate_logfile_, "Open:\t");
+  for (int i=0; i<=level_count; i++)
+    fprintf(zonestate_logfile_, "L%d = %d\t", i, (int)open_zones[i].size());
+  fprintf(zonestate_logfile_, "\n");
+
+  fprintf(zonestate_logfile_, "Closed:\t");
+  for (int i=0; i<=level_count; i++)
+    fprintf(zonestate_logfile_, "L%d = %d\t", i, (int)closed_zones[i].size());
+  fprintf(zonestate_logfile_, "\n");
+
+  fprintf(zonestate_logfile_, "Open zone empty percentage:\n");
+  for (int curr_level=0; curr_level<=level_count; curr_level++) {
+    fprintf(zonestate_logfile_, "L%d:", curr_level);
+
+    for (int curr_zone=0; curr_zone < (int)open_zones[curr_level].size(); curr_zone++) {
+      Zone *z = open_zones[curr_level][curr_zone];
+      fprintf(zonestate_logfile_, " %ld%%", 100 * z->capacity_ / z->max_capacity_);
+    }
+
+    fprintf(zonestate_logfile_, "\n");
+  }
+}
+
 ZonedBlockDevice::~ZonedBlockDevice() {
   for (const auto z : meta_zones) {
     delete z;
@@ -709,20 +767,25 @@ IOStatus ZonedBlockDevice::AllocateEmptyZone(Zone **zone_out, int level) {
     zenfs_parameters_.max_level = level;
   zenfs_parameters_.lock_max_level.unlock();
 
+  IOStatus s;
   switch(zenfs_parameters_.empty_zone_allocator) {
     case kDefault:
-      return AllocateEmptyZoneDefault(zone_out);
+      s = AllocateEmptyZoneDefault(zone_out); break;
     case kSequential:
-      return AllocateEmptyZoneSequential(zone_out);
+      s = AllocateEmptyZoneSequential(zone_out); break;
     case kRandom:
-      return AllocateEmptyZoneRandom(zone_out);
+      s = AllocateEmptyZoneRandom(zone_out); break;
     case kLeastWear:
-      return AllocateEmptyZoneLeastWear(zone_out);
+      s = AllocateEmptyZoneLeastWear(zone_out); break;
     case kHotnessBased:
-      return AllocateEmptyZoneHotnessBased(zone_out, level);
+      s = AllocateEmptyZoneHotnessBased(zone_out, level); break;
     default:
-      return AllocateEmptyZoneSequential(zone_out);
+      s = AllocateEmptyZoneSequential(zone_out);
   }
+
+  if(s.ok())
+    (*zone_out)->open_ = true;
+  return s;
 }
 
 IOStatus ZonedBlockDevice::InvalidateCache(uint64_t pos, uint64_t size) {

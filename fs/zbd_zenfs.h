@@ -78,8 +78,12 @@ class Zone {
   uint32_t reset_count_;  ///< Incremented on each call to Reset().
   uint32_t finish_count_; ///< Incremented on each call to Finish().
   PlacementPolicyType policy_;  ///< Placement policy of the first ZoneFile that wrote to this zone.
-  int level_; ///< LSM level of the first ZoneFile that wrote to this zone.
   bool flag_gc_reset_ = false;
+  bool open_ = false;
+  
+  std::vector<int> bytes_of_level;
+  int level_; ///< LSM level of the first ZoneFile that wrote to this zone.
+  void UpdateBytesOfLevel(int level, int bytes);
 
   IOStatus Reset();
   IOStatus Finish();
@@ -276,6 +280,7 @@ class ZonedBlockDevice {
   void LogZoneUsage();
   void LogGarbageInfo();
   void LogDetailedZoneState();
+  void LogLevelwiseZoneStats();
 
   uint64_t GetZoneSize();
   uint32_t GetNrZones();
@@ -581,6 +586,7 @@ class ZonedBlockDevice {
    */
   void GetPerZoneContribution(ZoneFile* zonefile, std::map<uint64_t, uint64_t>& result, double factor=1.0);
 
+ public:
   PlacementPolicyType GetPolicy(int level) {
     if(level < 0) return kLifetimeBased;
     if(level <= zenfs_parameters_.min_boundary) return zenfs_parameters_.upper_level_policy;

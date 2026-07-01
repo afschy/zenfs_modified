@@ -215,12 +215,15 @@ void ZenFS::GCWorker() {
     counter++;
 
     fprintf(zbd_->logfile_, "-----%08lu-----\n", counter);
-    // fprintf(zbd_->zonestate_logfile_, "-----%08lu-----\n", counter);
-    // zbd_->LogDetailedZoneState();
+    fprintf(zbd_->zonestate_logfile_, "-----%08lu-----\n", counter);
+    
+    zbd_->LogLevelwiseZoneStats();
     fprintf(zbd_->logfile_, "Reset count = %lu, alloc = %lu, failures = %lu, ", zbd_->GetTotalResetCount(), zbd_->GetAllocCount(), zbd_->GetFailureCount());
     // fprintf(zbd_->logfile_, "Failure rate = %0.2lf, Finish = %0.2lf MB\n", 1.00 * zbd_->GetFailureCount() / zbd_->GetAllocCount(), 1.00*zbd_->GetFinishBytesWritten()/(1<<20));
     fprintf(zbd_->logfile_, "above_thresh = %lu, below_thresh = %lu, below_thresh_s = %lu\n", zbd_->nearest_real_success, zbd_->nearest_need_new, zbd_->nearest_got_new);
     fprintf(zbd_->logfile_, "Before GC: %lu%% free, %lu empty zones\n", free_percent, zbd_->GetEmptyZoneCount());
+    
+    fflush(zbd_->zonestate_logfile_);
     if (free_percent > GC_START_LEVEL) {
       fprintf(zbd_->logfile_, "GC not triggered, free space must be less than %lu%%\n", GC_START_LEVEL);
       fflush(zbd_->logfile_);

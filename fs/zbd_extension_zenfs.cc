@@ -484,6 +484,61 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   if(level < 0 || (unsigned)level >= levelwise_file_list_.size())
     return IOStatus::OK();
 
+  int target_open_zones[10] = {1, 1, 4, 4};
+  std::vector<int> open_zone_count(10, 0);
+  for(const auto z : io_zones)
+    if(z->IsUsed() && !z->IsFull() && z->level_ >= 0)
+      open_zone_count[z->level_]++;
+
+  std::vector<Zone*> newly_opened_zones;
+  for(int curr_level=0; curr_level <= 10; curr_level++) {
+    if(GetEmptyZoneCount() <= zenfs_parameters_.reserve_zone_count) break;
+    if(target_open_zones[curr_level] == 0) break;
+
+    int diff = target_open_zones[curr_level] - open_zone_count[curr_level];
+    // printf("Level: %d, open: %d, target: %d, diff: %d\n", curr_level, open_zone_count[curr_level], target_open_zones[curr_level], diff);
+    if(diff <= 0) continue;
+    
+    for(int i=0; i<diff; i++) {
+      if(!GetActiveIOZoneTokenIfAvailable())
+        continue;
+      
+      Zone* temp_zone;
+      IOStatus s1 = AllocateEmptyZone(&temp_zone, curr_level);
+      IOStatus s2 = temp_zone->CheckRelease();
+
+      if(!s1.ok() || !s2.ok()) {
+        PutOpenIOZoneToken();
+        PutActiveIOZoneToken();
+        continue;
+      }
+
+      temp_zone->lifetime_ = (level <= 1) ? Env::WLTH_MEDIUM : ((level == 2) ? Env::WLTH_LONG : Env::WLTH_EXTREME);
+      temp_zone->level_ = curr_level;
+      temp_zone->policy_ = GetPolicy(curr_level);
+
+      newly_opened_zones.push_back(temp_zone);
+      zenfs_parameters_.max_level = std::max(zenfs_parameters_.max_level, (uint8_t)level);
+    }
+  }
+  // printf("Opened %d zones\n", (int)newly_opened_zones.size());
+
+  for(Zone* z : io_zones) {
+    if(z->level_ != level) continue;
+    if(!z->Acquire()) continue;
+    
+    if(*best_diff_out && 1.0*z->capacity_/z->max_capacity_ > 0.8) {
+      *best_diff_out = 0;
+      *zone_out = z;
+      // printf("Took an already open zone\n");
+      return IOStatus::OK();
+    }
+    else {
+      IOStatus s = z->CheckRelease();
+      if(!s.ok()) return s;
+    }
+  }
+
   std::vector<ZoneFile*> same_level_files;
   GetSameLevelFiles(same_level_files, level);
 
@@ -496,7 +551,7 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   }
 
   std::map<uint64_t, uint64_t> contribution_map;
-  const double file_size_max = (zenfs_parameters_.buffer_size_megabytes - 1) * 1024 * 1024;
+  // const double file_size_max = (zenfs_parameters_.buffer_size_megabytes - 1) * 1024 * 1024;
   
   double factor = 1.0;
   for(unsigned int i = index_middle; i<same_level_files.size(); i++) {
@@ -504,8 +559,8 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
     if(curr == zonefile)
       continue;
     GetPerZoneContribution(curr, contribution_map, factor);
-    // factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
-    factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
+    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
+    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
     if(factor < 0.2)
       factor = 0.2;
   }
@@ -513,9 +568,11 @@ ZonedBlockDevice::MatchSameLevelNearbyKeys(
   factor = 1.0;
   for(int i = index_middle-1; i >= 0; i--) {
     ZoneFile *curr = same_level_files[i];
+    if(curr == zonefile)
+      continue;
     GetPerZoneContribution(curr, contribution_map, factor);
-    // factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
-    factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
+    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
+    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
     if(factor < 0.2)
       factor = 0.2;
   }
