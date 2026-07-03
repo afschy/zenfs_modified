@@ -867,7 +867,7 @@ IOStatus ZenFS::DeleteFile(const std::string& fname, const IOOptions& options,
   s = DeleteFileNoLock(fname, options, dbg);
   files_mtx_.unlock();
   if (s.ok()) s = zbd_->ResetUnusedIOZones();
-  zbd_->LogZoneStats();
+  // zbd_->LogZoneStats();
 
   return s;
 }

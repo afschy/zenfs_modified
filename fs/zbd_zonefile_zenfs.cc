@@ -295,6 +295,7 @@ void ZoneFile::ClearExtents() {
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
     zone->UpdateBytesOfLevel((*e)->level_, -(*e)->length_);
+    zbd_->LogPlacementDelete(GetFilename(), zone, true);
     delete *e;
   }
   extents_.clear();
@@ -692,7 +693,7 @@ IOStatus ZoneFile::RecoverSparseExtents(uint64_t start, uint64_t end,
   uint32_t block_sz = GetBlockSize();
   uint64_t next_extent_start = start;
   char* buffer;
-  int recovered_segments = 0;
+  // int recovered_segments = 0;
   int ret;
 
   ret = posix_memalign((void**)&buffer, sysconf(_SC_PAGESIZE), block_sz);
@@ -714,7 +715,7 @@ IOStatus ZoneFile::RecoverSparseExtents(uint64_t start, uint64_t end,
       s = IOStatus::IOError("Unexpected extent length while recovering");
       break;
     }
-    recovered_segments++;
+    // recovered_segments++;
 
     zone->used_capacity_ += extent_length;
     extents_.push_back(new ZoneExtent(next_extent_start + SPARSE_HEADER_SIZE,

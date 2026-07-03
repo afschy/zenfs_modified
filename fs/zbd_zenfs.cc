@@ -59,6 +59,8 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
       start_(zbd_be->ZoneStart(zones, idx)),
       max_capacity_(zbd_be->ZoneMaxCapacity(zones, idx)),
       wp_(zbd_be->ZoneWp(zones, idx)) {
+  static int id_counter = 0;
+  id_ = id_counter++;
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
@@ -213,6 +215,12 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
   
   std::string zonestate_filename = "zonestate_" + zenfs_parameters_.logname;
   zonestate_logfile_ = fopen(zonestate_filename.c_str(), "w");
+
+  Status s = Env::Default()->NewLogger("reset.log", &reset_logger_);
+  if (!s.ok())
+    fprintf(stderr, "reset_logger_: Could not create logger");
+  else
+    reset_logger_->SetInfoLogLevel(INFO_LEVEL);
 }
 
 IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
@@ -432,7 +440,7 @@ void ZonedBlockDevice::LogDetailedZoneState() {
     double val_p = 100.00 * z->used_capacity_ / z->max_capacity_;
     
     bool empty = z->IsEmpty();
-    bool open = (z->used_capacity_ > 0) && !z->IsFull();
+    bool open = z->IsUsed() && !z->IsFull();
     bool closed = z->capacity_ == 0;
 
     std::string state = "undefined";
@@ -440,9 +448,8 @@ void ZonedBlockDevice::LogDetailedZoneState() {
     else if (closed) state = "closed";
     else if (empty) state = "empty";
 
-    fprintf(zonestate_logfile_, "No: %d, sat: %0.4lf%%, val: %0.4lf%%, state: %s\n", zone_no, sat_p, val_p, state.c_str());
+    Info(logger_, "No: %d, sat: %0.2lf%%, val: %0.2lf%%, state: %s\n", zone_no, sat_p, val_p, state.c_str());
   }
-  fflush(zonestate_logfile_);
 }
 
 void ZonedBlockDevice::LogLevelwiseZoneStats() {
@@ -450,7 +457,7 @@ void ZonedBlockDevice::LogLevelwiseZoneStats() {
   std::vector<std::vector<Zone*>> open_zones(level_count+1), closed_zones(level_count+1);
   
   for (Zone* z : io_zones) {
-    bool open = (z->used_capacity_ > 0 || z->open_) && !z->IsFull();
+    bool open = z->IsUsed() && !z->IsFull();
     if (open && z->level_ >= 0 && z->level_ <= level_count) open_zones[z->level_].push_back(z);
 
     bool closed = z->capacity_ == 0;
@@ -480,6 +487,26 @@ void ZonedBlockDevice::LogLevelwiseZoneStats() {
   }
 }
 
+void ZonedBlockDevice::LogPlacementDelete(std::string filename, Zone* z, bool file_delete) {
+  static int file_alloc_count = 0, file_delete_count = 0;
+  double saturated_p = 100.00 * (z->max_capacity_ - z->capacity_) / z->max_capacity_;
+  double valid_p = 100.00 * z->used_capacity_ / z->max_capacity_;
+  int zone_id = z->id_;
+
+  if (!file_delete)
+    Info(logger_, "------------------------------Alloc:  %05d------------------------------", ++file_alloc_count);
+  else
+    Info(logger_, "------------------------------Delete: %05d------------------------------", ++file_delete_count);
+
+  Info(logger_, "Filename: %s, ZoneID: %d, Saturated: %0.2lf%%, Valid: %0.2lf%%", filename.c_str(), zone_id, saturated_p, valid_p);
+
+  LogZoneStats();
+  if (zenfs_parameters_.log_zonestats_placement_delete_verbose)
+    LogDetailedZoneState();
+
+  Info(logger_, "-------------------------------------------------------------------------");
+}
+
 ZonedBlockDevice::~ZonedBlockDevice() {
   for (const auto z : meta_zones) {
     delete z;
@@ -491,6 +518,7 @@ ZonedBlockDevice::~ZonedBlockDevice() {
   fprintf(logfile_, "Data written = %0.4lf MB, GC movement = %0.4lf MB\n",
           1.00*bytes_written_/(1<<20), 1.00*gc_bytes_written_/(1<<20));
   fclose(logfile_);
+  fclose(zonestate_logfile_);
 }
 
 IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
@@ -522,23 +550,26 @@ IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
 
 IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
   for (const auto z : io_zones) {
-    if (z->Acquire()) {
-      if (!z->IsEmpty() && !z->IsUsed()) {
-        bool full = z->IsFull();
-        IOStatus reset_status = z->Reset();
-        IOStatus release_status = z->CheckRelease();
-        if (!reset_status.ok()) return reset_status;
-        if (!release_status.ok()) return release_status;
-        if (!full) PutActiveIOZoneToken();
-        total_reset_count_++;
-        if (gc) { 
-          z->flag_gc_reset_ = true;
-          gc_reset_count_++;
-        }
-      } else {
-        IOStatus release_status = z->CheckRelease();
-        if (!release_status.ok()) return release_status;
+    if (!z->Acquire()) continue;
+
+    if (!z->IsEmpty() && !z->IsUsed()) {
+      bool full = z->IsFull();
+      IOStatus reset_status = z->Reset();
+      IOStatus release_status = z->CheckRelease();
+      if (!reset_status.ok()) return reset_status;
+      if (!release_status.ok()) return release_status;
+      if (!full) PutActiveIOZoneToken();
+      total_reset_count_++;
+      if (gc) { 
+        z->flag_gc_reset_ = true;
+        gc_reset_count_++;
+        Info(reset_logger_, "GC reset num: %lu, ZoneID: %lu, Full: %d", gc_reset_count_, z->id_, (int)full);
       }
+      else
+        Info(reset_logger_, "No-valid reset num: %lu, ZoneID: %lu, Full: %d\n", total_reset_count_ - gc_reset_count_, z->id_, (int)full);
+    } else {
+      IOStatus release_status = z->CheckRelease();
+      if (!release_status.ok()) return release_status;
     }
   }
   return IOStatus::OK();
@@ -697,7 +728,9 @@ IOStatus ZonedBlockDevice::GetBestOpenZoneMatch(
   function_map = {
     {kLifetimeBased, &ZonedBlockDevice::MatchLifetimeBased},
     {kCAZA, &ZonedBlockDevice::MatchCAZA},
-    {kSameLevelNearbyKeys, &ZonedBlockDevice::MatchSameLevelNearbyKeys},
+    {kPlazaBase, &ZonedBlockDevice::MatchPlazaBase},
+    {KPlazaIntermediate, &ZonedBlockDevice::MatchPlazaIntermediate},
+    {kPlazaAdvanced, &ZonedBlockDevice::MatchPlazaAdvanced},
     {kSameLevelNearbyKeysSimple, &ZonedBlockDevice::MatchSameLevelNearbyKeysSimple},
     {kArrivalTimeBased, &ZonedBlockDevice::MatchArrivalTimeBased},
     {kTombstoneDensity, &ZonedBlockDevice::MatchTombstoneDensity},
@@ -878,7 +911,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
 
   Zone *allocated_zone = nullptr;
   unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
-  int new_zone = 0;
+  // int new_zone = 0;
   IOStatus s;
 
   auto tag = ZENFS_WAL_IO_ALLOC_LATENCY;
@@ -977,7 +1010,7 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         allocated_zone->lifetime_ = file_lifetime;
         allocated_zone->policy_ = GetPolicy(zonefile->level_);
         allocated_zone->level_ = zonefile->level_;
-        new_zone = true;
+        // new_zone = true;
         if (need_flag) nearest_got_new++;
       } else {
         PutActiveIOZoneToken();
@@ -987,17 +1020,15 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
 
   if (allocated_zone) {
     assert(allocated_zone->IsBusy());
-    Info(logger_,
-          "Allocating zone(new=%d) start: 0x%lx wp: 0x%lx lt: %d file lt: %d\n",
-          new_zone, allocated_zone->start_, allocated_zone->wp_,
-          allocated_zone->lifetime_, file_lifetime);
+    if(zenfs_parameters_.log_zonestats_placement_delete)
+      LogPlacementDelete(zonefile->GetFilename(), allocated_zone, false);
   } else {
     PutOpenIOZoneToken();
   }
 
-  if (io_type != IOType::kWAL) {
-    LogZoneStats();
-  }
+  // if (io_type != IOType::kWAL) {
+  //   LogZoneStats();
+  // }
 
   *out_zone = allocated_zone;
 

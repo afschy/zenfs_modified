@@ -69,6 +69,7 @@ class Zone {
   explicit Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
                 std::unique_ptr<ZoneList> &zones, unsigned int idx);
 
+  uint64_t id_;
   uint64_t start_;  ///< Starting logical address of this zone
   uint64_t capacity_; ///< Remaining capacity in bytes
   uint64_t max_capacity_; ///< Maximum capacity in bytes
@@ -234,6 +235,7 @@ class ZonedBlockDevice {
   ZenfsParamContainer zenfs_parameters_;
   FILE* logfile_;  ///< Log file for minimal GC-related output.
   FILE* zonestate_logfile_; ///< Log file for detailed zone state snapshots at each GC iteration.
+  std::shared_ptr<Logger> reset_logger_; ///< Log file for zone reset stats.
 
   /// Mutex to acquire when accessing or modifying levelwise_file_list_.
   std::mutex levelwise_files_mtx_;
@@ -281,6 +283,7 @@ class ZonedBlockDevice {
   void LogGarbageInfo();
   void LogDetailedZoneState();
   void LogLevelwiseZoneStats();
+  void LogPlacementDelete(std::string filename, Zone* z, bool file_delete=false);
 
   uint64_t GetZoneSize();
   uint32_t GetNrZones();
@@ -402,10 +405,18 @@ class ZonedBlockDevice {
    * @param[in] min_capacity minimum zone capacity required
    * @return IOStatus
    */
-  IOStatus MatchSameLevelNearbyKeys(ZoneFile* zonefile,
-                                    Env::WriteLifeTimeHint file_lifetime,
-                                    unsigned int *best_diff_out, Zone **zone_out,
-                                    uint32_t min_capacity = 0);
+  IOStatus MatchPlazaBase(ZoneFile* zonefile,
+                          Env::WriteLifeTimeHint file_lifetime,
+                          unsigned int *best_diff_out, Zone **zone_out,
+                          uint32_t min_capacity = 0);
+  IOStatus MatchPlazaIntermediate(ZoneFile* zonefile,
+                                  Env::WriteLifeTimeHint file_lifetime,
+                                  unsigned int *best_diff_out, Zone **zone_out,
+                                  uint32_t min_capacity = 0);
+  IOStatus MatchPlazaAdvanced(ZoneFile* zonefile,
+                              Env::WriteLifeTimeHint file_lifetime,
+                              unsigned int *best_diff_out, Zone **zone_out,
+                              uint32_t min_capacity = 0);
   IOStatus MatchSameLevelNearbyKeysSimple(ZoneFile* zonefile,
                                           Env::WriteLifeTimeHint file_lifetime,
                                           unsigned int *best_diff_out, Zone **zone_out,

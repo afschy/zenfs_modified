@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <mutex>
+#include <sstream>
+#include <vector>
 namespace ROCKSDB_NAMESPACE {
 
 /** Strategy for selecting which empty zone to open when a new zone is needed. */
@@ -25,7 +27,9 @@ enum PlacementPolicyType {
   kLifetimeBased,             ///< ZenFS default; places files by write lifetime hint.
   kLeveledLifetimeBased,      ///< LIZA variant from the ZoneKV paper; used as a fallback.
   kCAZA,                      ///< Co-locates with neighboring-level files that have overlapping key ranges.
-  kSameLevelNearbyKeys,       ///< Co-locates with the nearest same-level files by key range (weighted).
+  kPlazaBase,                 ///< Co-locates with the nearest same-level files by key range (weighted).
+  KPlazaIntermediate,         ///< Slightly more complicated version of PLAZA.
+  kPlazaAdvanced,             ///< PLAZA with heavy modifications in terms of opening new zones.
   kSameLevelNearbyKeysSimple, ///< Simplified nearest same-level key range variant.
   kArrivalTimeBased,          ///< Fills zones in file-arrival order per level (ZoneKV).
   kTombstoneDensity,          ///< Routes high-tombstone-density files to a dedicated zone.
@@ -48,12 +52,15 @@ enum GCType {
 /** Holds all tunable ZenFS runtime parameters; populated at startup via LoadParamsFromFile(). */
 struct ZenfsParamContainer {
   double nearest_newzone_threshold = 0.0;
+  ///< Advanced plaza sends the file to an empty zone if that zone contains higher than this fraction of empty space
+  double zone_fill_threshold = 0.8;
 
   EmptyZoneAllocType empty_zone_allocator = kDefault;
   uint8_t real_caza = 1;
   uint8_t real_oaza = 1;
   uint8_t real_zonekv = 1;
   uint8_t dynamic_level_adjustment = 1; ///< When the file composition of a zone changes, its level label will also change.
+  std::vector<uint8_t> zones_to_open = std::vector<uint8_t>(10, 0); ///< For kPlazaAdvanced, the number of zones to keep open during allocation, per-level
 
   uint64_t average_value_size = 4080;
 
@@ -90,8 +97,10 @@ struct ZenfsParamContainer {
   uint32_t buffer_count_max = 20;
 
   std::string logname = "zarc_default.log";
+  uint8_t log_zonestats_placement_delete = 1;
+  uint8_t log_zonestats_placement_delete_verbose = 0;
 
-  void LoadParamsFromFile() {
+  void LoadParamsFromFile(bool print=true) {
     static std::unordered_map<std::string, EmptyZoneAllocType>
       empty_zone_allocator_map = {
         {"kDefault", kDefault},
@@ -107,7 +116,10 @@ struct ZenfsParamContainer {
         {"kLifetimeBased", kLifetimeBased},
         {"kLeveledLifetimeBased", kLeveledLifetimeBased},
         {"kCAZA", kCAZA},
-        {"kSameLevelNearbyKeys", kSameLevelNearbyKeys},
+        {"kSameLevelNearbyKeys", kPlazaBase},
+        {"kPlazaBase", kPlazaBase},
+        {"KPlazaIntermediate", KPlazaIntermediate},
+        {"kPlazaAdvanced", kPlazaAdvanced},
         {"kSameLevelNearbyKeysSimple", kSameLevelNearbyKeysSimple},
         {"kArrivalTimeBased", kArrivalTimeBased},
         {"kTombstoneDensity", kTombstoneDensity},
@@ -200,6 +212,12 @@ struct ZenfsParamContainer {
           nearest_newzone_threshold = value_double;
       }
 
+      else if(type == "zone_fill_threshold") {
+        double value_double = std::stod(value);
+        if(value_double >= 0.0 && value_double <= 1.0)
+          zone_fill_threshold = value_double;
+      }
+
       else if(type == "gc_start_level") {
         int value_int = std::stoi(value);
         if(value_int > 0 && value_int < 100)
@@ -250,6 +268,21 @@ struct ZenfsParamContainer {
           dynamic_level_adjustment = 0;
       }
 
+      else if(type == "zones_to_open") {
+        std::vector<uint8_t> parsed_zones_to_open;
+        std::stringstream value_stream(value);
+        std::string token;
+        while(std::getline(value_stream, token, ',')) {
+          if(token.empty())
+            continue;
+          int value_int = std::stoi(token);
+          if(value_int >= 0 && value_int <= 255)
+            parsed_zones_to_open.push_back(static_cast<uint8_t>(value_int));
+        }
+        if(!parsed_zones_to_open.empty())
+          zones_to_open = parsed_zones_to_open;
+      }
+
       else if(type == "min_boundary") {
         int value_int = std::stoi(value);
         if(value_int >= 0 && value_int < 100)
@@ -289,6 +322,16 @@ struct ZenfsParamContainer {
         if(value_int > 0 && value_int <= 100)
           buffer_count_max = value_int;
       }
+
+      else if(type == "log_zonestats_placement_delete") {
+        uint32_t value_int = std::stoul(value);
+        log_zonestats_placement_delete = value_int;
+      }
+
+      else if(type == "log_zonestats_placement_delete_verbose") {
+        uint32_t value_int = std::stoul(value);
+        log_zonestats_placement_delete_verbose = value_int;
+      }
     }
 
     if(max_boundary <= min_boundary)
@@ -306,6 +349,11 @@ struct ZenfsParamContainer {
     fprintf(fp, "GC stop level = %lu\n", gc_stop_level);
     fprintf(fp, "fragmentation = %u\n", fragmentation_enabled);
     fprintf(fp, "nearest_newzone_threshold = %lf\n", nearest_newzone_threshold);
+    fprintf(fp, "dynamic_level_adjustment = %u\n", dynamic_level_adjustment);
+    fprintf(fp, "zones_to_open: ");
+    for(int i=0; i<10; i++)
+      fprintf(fp, " %u", zones_to_open[i]);
+    fprintf(fp, "\n");
   }
 };
 
