@@ -348,7 +348,8 @@ struct ZenfsParamContainer {
     fprintf(fp, "GC start level = %lu\n", gc_start_level);
     fprintf(fp, "GC stop level = %lu\n", gc_stop_level);
     fprintf(fp, "fragmentation = %u\n", fragmentation_enabled);
-    fprintf(fp, "nearest_newzone_threshold = %lf\n", nearest_newzone_threshold);
+    fprintf(fp, "nearest_newzone_threshold = %0.2lf\n", nearest_newzone_threshold);
+    fprintf(fp, "zone_fill_threshold = %0.2lf\n", zone_fill_threshold);
     fprintf(fp, "dynamic_level_adjustment = %u\n", dynamic_level_adjustment);
     fprintf(fp, "zones_to_open: ");
     for(int i=0; i<10; i++)

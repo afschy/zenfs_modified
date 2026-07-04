@@ -763,6 +763,7 @@ ZonedBlockDevice::MatchPlazaAdvanced(
   }
 
   nearest_real_success++;
+  *best_diff_out = 0;
   *zone_out = allocated_zone;
 
   return IOStatus::OK();
