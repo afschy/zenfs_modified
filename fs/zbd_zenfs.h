@@ -814,7 +814,9 @@ class ZoneFile {
   std::shared_ptr<ZenFSMetrics> GetZBDMetrics() { return zbd_->GetMetrics(); };
   IOType GetIOType() const { return io_type_; };
   bool IsDeleted() const { return is_deleted_; };
-  void SetDeleted() {
+  std::string temp_fname_ = "";  // Needed for printing filename to log files after deleting as deletion operations remove filenames
+  void SetDeleted(std::string fname="") {
+    temp_fname_ = fname;
     is_deleted_ = true;
     zbd_->RemoveZoneFileRecord(this);
   };

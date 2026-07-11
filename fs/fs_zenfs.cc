@@ -549,7 +549,7 @@ IOStatus ZenFS::DeleteFileNoLock(std::string fname, const IOOptions& options,
     } else {
       if (zoneFile->GetNrLinks() > 0) return s;
       /* Mark up the file as deleted so it won't be migrated by GC */
-      zoneFile->SetDeleted();
+      zoneFile->SetDeleted(fname);
       zoneFile.reset();
     }
   } else {

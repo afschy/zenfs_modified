@@ -295,7 +295,7 @@ void ZoneFile::ClearExtents() {
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
     zone->UpdateBytesOfLevel((*e)->level_, -(*e)->length_);
-    zbd_->LogPlacementDelete(GetFilename(), zone, true);
+    zbd_->LogPlacementDelete(temp_fname_, zone, true);
     delete *e;
   }
   extents_.clear();
