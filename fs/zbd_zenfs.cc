@@ -554,7 +554,10 @@ IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
 
     if (!z->IsEmpty() && !z->IsUsed()) {
       std::string data_amount_str = "Levelwise data (MB):";
+      bool found = false;
       for (unsigned int i=0; i<z->bytes_of_level.size(); i++) {
+        if (z->bytes_of_level[i] == 0) continue;
+        found = true;
         double mb = 1.00 * z->bytes_of_level[i] / (1 << 20);
         mb = std::ceil(100*mb) / 100;
         data_amount_str  = data_amount_str + " L" + std::to_string(i) + ":" + std::to_string(mb);
@@ -574,7 +577,8 @@ IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
       }
       else
         Info(reset_logger_, "No-valid reset num: %lu, ZoneID: %lu, Full: %d\n", total_reset_count_ - gc_reset_count_, z->id_, (int)full);
-      Info(reset_logger_, "%s", data_amount_str.c_str());
+      if (found)
+        Info(reset_logger_, "%s", data_amount_str.c_str());
     } else {
       IOStatus release_status = z->CheckRelease();
       if (!release_status.ok()) return release_status;
