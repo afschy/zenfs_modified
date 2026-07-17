@@ -74,12 +74,12 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
 }
 
 void Zone::UpdateBytesOfLevel(int level, int bytes) {
-  if (!zbd_->zenfs_parameters_.dynamic_level_adjustment || level < 0) return;
   if (level >= (int)bytes_of_level.size()) bytes_of_level.resize(level+1, 0);
-
+  
   bytes_of_level[level] += bytes;
   if (bytes_of_level[level] < 0) bytes_of_level[level] = 0;
-
+  
+  if (!zbd_->zenfs_parameters_.dynamic_level_adjustment || level < 0) return;
   int chosen_level = level_;
   for(uint8_t i=0; i<bytes_of_level.size(); i++) {
     if (bytes_of_level[i] > bytes_of_level[chosen_level])
@@ -553,6 +553,13 @@ IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
     if (!z->Acquire()) continue;
 
     if (!z->IsEmpty() && !z->IsUsed()) {
+      std::string data_amount_str = "Levelwise data (MB):";
+      for (unsigned int i=0; i<z->bytes_of_level.size(); i++) {
+        double mb = 1.00 * z->bytes_of_level[i] / (1 << 20);
+        mb = std::ceil(100*mb) / 100;
+        data_amount_str  = data_amount_str + " L" + std::to_string(i) + ":" + std::to_string(mb);
+      }
+
       bool full = z->IsFull();
       IOStatus reset_status = z->Reset();
       IOStatus release_status = z->CheckRelease();
@@ -567,6 +574,7 @@ IOStatus ZonedBlockDevice::ResetUnusedIOZones(bool gc) {
       }
       else
         Info(reset_logger_, "No-valid reset num: %lu, ZoneID: %lu, Full: %d\n", total_reset_count_ - gc_reset_count_, z->id_, (int)full);
+      Info(reset_logger_, "%s", data_amount_str.c_str());
     } else {
       IOStatus release_status = z->CheckRelease();
       if (!release_status.ok()) return release_status;
