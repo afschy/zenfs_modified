@@ -254,6 +254,7 @@ class ZonedBlockDevice {
   IOStatus Open(bool readonly, bool exclusive);
 
   Zone *GetIOZone(uint64_t offset);
+  std::vector<Zone *> GetIoZones() {return io_zones;}
 
   /**
    * Hands over a zone to the ZoneFile for writing data.

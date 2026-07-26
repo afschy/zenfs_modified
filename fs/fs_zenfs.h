@@ -170,6 +170,7 @@ class ZenFS : public FileSystemWrapper {
   };
 
   void LogFiles();
+  void LogZonewiseKeyRanges(FILE* log);
   void ClearFiles();
   std::string FormatPathLexically(fs::path filepath);
   IOStatus WriteSnapshotLocked(ZenMetaLog* meta_log);

@@ -28,6 +28,43 @@ inline bool ends_with(std::string const& value, std::string const& ending) {
   return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
 }
 
+void ZenFS::LogZonewiseKeyRanges(FILE* log) {
+  std::map<Zone*, std::vector<ZoneFile*>> per_zone_files;
+
+  for (auto it = files_.begin(); it != files_.end(); it++) {
+    ZoneFile* zonefile = (it->second).get();
+    ZoneFileSnapshot snapshot(*zonefile);
+    std::vector<ZoneExtentSnapshot> extents = snapshot.extents;
+
+    for (auto ext : extents) {
+      Zone* zone = zbd_->zone_start_to_pointer_map_[ext.zone_start];
+      per_zone_files[zone].push_back(zonefile);
+    }
+  }
+
+  std::vector<Zone*> io_zones = zbd_->GetIoZones();
+  io_zones.erase(std::remove_if(io_zones.begin(), io_zones.end(),
+                  [](const Zone* z) { return z->level_ < 0; }),
+                  io_zones.end());
+  std::sort(io_zones.begin(), io_zones.end(),
+            [](const Zone* a, const Zone* b) { return a->level_ < b->level_; });
+  
+  for (Zone* zone : io_zones) {
+    if(zone->IsEmpty()) continue;
+    fprintf(log, "zone_id: %03lu, ", zone->id_);
+    fprintf(log, "level: %d, ", zone->level_);
+    fprintf(log, "saturation: %0.2lf%%, ", 100.00 - 100.00 * zone->capacity_ / zone->max_capacity_);
+    fprintf(log, "valid_data: %0.2lf%%,", 100.00 * zone->used_capacity_ / zone->max_capacity_);
+
+    std::vector<ZoneFile*> files_in_zone = per_zone_files[zone];
+    for (ZoneFile* curr_file : files_in_zone) {
+      if (!curr_file->smallest_.size() || !curr_file->largest_.size()) continue;
+      fprintf(log, "\t[%s %s]", curr_file->smallest_.user_key().ToString().c_str(), curr_file->largest_.user_key().ToString().c_str());
+    }
+    fprintf(log, "\n");
+  }
+}
+
 IOStatus ZenFS::MigrateExtents(
     const std::vector<ZoneExtentSnapshot*>& extents) {
   IOStatus s;
@@ -224,6 +261,7 @@ void ZenFS::GCWorker() {
             zbd_->nearest_real_success, zbd_->nearest_need_new, zbd_->nearest_got_new);
     fprintf(zbd_->logfile_, "Before GC: %lu%% free, %lu empty zones\n", free_percent, zbd_->GetEmptyZoneCount());
     
+    LogZonewiseKeyRanges(zbd_->zonestate_logfile_);
     fflush(zbd_->zonestate_logfile_);
     if (free_percent > GC_START_LEVEL) {
       fprintf(zbd_->logfile_, "GC not triggered, free space must be less than %lu%%\n", GC_START_LEVEL);
