@@ -37,6 +37,13 @@
 #include "zonefs_zenfs.h"
 namespace ROCKSDB_NAMESPACE {
 
+bool string_is_numeric(std::string str) {
+  for (unsigned i=0; i<str.length(); i++) {
+    if (str[i] < '0' || str[i] > '9') return false;
+  }
+  return true;
+}
+
 uint64_t ZonedBlockDevice::GetEmptyZoneCount() {
   uint64_t counter = 0;
   for (const auto z : io_zones)
@@ -656,114 +663,89 @@ ZonedBlockDevice::MatchPlazaAdvanced(
     Env::WriteLifeTimeHint file_lifetime,
     unsigned int *best_diff_out, Zone **zone_out,
     uint32_t min_capacity) {
+  
+  if (zonefile->level_ < 2 || !string_is_numeric(zonefile->smallest_.user_key().ToString()))
+    return MatchPlazaBase(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+  
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   
   int level = zonefile->level_;
   *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
-  // level doesn't exist
   if(level < 0 || (unsigned)level >= levelwise_file_list_.size())
     return IOStatus::OK();
-
-  const std::vector<uint8_t>& target_open_zones = zenfs_parameters_.zones_to_open;
-  std::vector<int> open_zone_count(10, 0);
-  for(const auto z : io_zones)
-    if(z->IsUsed() && !z->IsFull() && z->level_ >= 0)
-      open_zone_count[z->level_]++;
-
-  for(int curr_level=0; curr_level < (int)target_open_zones.size(); curr_level++) {
-    if(GetEmptyZoneCount() <= zenfs_parameters_.reserve_zone_count) break;
-    if(target_open_zones[curr_level] == 0) break;
-
-    int diff = (int)target_open_zones[curr_level] - open_zone_count[curr_level];
-    if(diff <= 0) continue;
-    
-    for(int i=0; i<diff; i++) {
-      if(!GetActiveIOZoneTokenIfAvailable())
-        continue;
-      
-      Zone* temp_zone;
-      IOStatus s1 = AllocateEmptyZone(&temp_zone, curr_level);
-      IOStatus s2 = temp_zone->CheckRelease();
-
-      if(!s1.ok() || !s2.ok()) {
-        PutOpenIOZoneToken();
-        PutActiveIOZoneToken();
-        continue;
-      }
-
-      temp_zone->lifetime_ = (level <= 1) ? Env::WLTH_MEDIUM : ((level == 2) ? Env::WLTH_LONG : Env::WLTH_EXTREME);
-      temp_zone->level_ = curr_level;
-      temp_zone->policy_ = GetPolicy(curr_level);
-
-      zenfs_parameters_.max_level = std::max(zenfs_parameters_.max_level, (uint8_t)level);
-    }
-  }
-
-  for(Zone* z : io_zones) {
-    if(z->level_ != level) continue;
-    if(!z->Acquire()) continue;
-    
-    if(*best_diff_out && 1.0*z->capacity_/z->max_capacity_ > zenfs_parameters_.zone_fill_threshold) {
-      *best_diff_out = 0;
-      *zone_out = z;
-      return IOStatus::OK();
-    }
-    else {
-      IOStatus s = z->CheckRelease();
-      if(!s.ok()) return s;
-    }
-  }
+  Zone* allocated_zone = nullptr;
 
   std::vector<ZoneFile*> same_level_files;
   GetSameLevelFiles(same_level_files, level);
 
-  // index_middle is the spot in the vector zonefile should be in
-  int index_middle = 0;
-  for(ZoneFile *curr : same_level_files) {
-    if(sstableKeyCompare(zonefile->icmp_.user_comparator(), curr->smallest_, zonefile->smallest_) >= 0)
-      break;
-    index_middle++;
-  }
-
-  std::map<uint64_t, uint64_t> contribution_map;
-  // const double file_size_max = (zenfs_parameters_.buffer_size_megabytes - 1) * 1024 * 1024;
+  std::string new_key = zonefile->smallest_.user_key().ToString();
+  double new_key_num = std::stod(new_key);
   
-  double factor = 1.0;
-  for(unsigned int i = index_middle; i<same_level_files.size(); i++) {
-    ZoneFile *curr = same_level_files[i];
-    if(curr == zonefile)
-      continue;
-    GetPerZoneContribution(curr, contribution_map, factor);
-    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
-    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
-    if(factor < 0.2)
-      factor = 0.2;
+  std::map<Zone*, double> zone_max_diff_map;
+  for (ZoneFile* curr_file : same_level_files) {
+    std::string curr_key = curr_file->smallest_.user_key().ToString();
+    if (!string_is_numeric(curr_key)) continue;
+
+    double curr_key_num = std::stod(curr_key);
+    double curr_diff = std::abs(new_key_num - curr_key_num);
+
+    ZoneFileSnapshot snapshot(*curr_file);
+    std::vector<ZoneExtentSnapshot> extents = snapshot.extents;
+
+    for(ZoneExtentSnapshot curr_extent : extents) {
+      Zone* zone = zone_start_to_pointer_map_[curr_extent.zone_start];
+      if (zone_max_diff_map.find(zone) == zone_max_diff_map.end())
+        zone_max_diff_map[zone] = -1;
+      zone_max_diff_map[zone] = std::max(zone_max_diff_map[zone], curr_diff);
+    }
   }
 
-  factor = 1.0;
-  for(int i = index_middle-1; i >= 0; i--) {
-    ZoneFile *curr = same_level_files[i];
-    if(curr == zonefile)
-      continue;
-    GetPerZoneContribution(curr, contribution_map, factor);
-    factor *= 0.8;  // the farther the file is from the perfect spot, the less important it becomes
-    // factor *= (1.0 - 0.2 * curr->GetFileSizeMeta() / file_size_max);
-    if(factor < 0.2)
-      factor = 0.2;
+  IOStatus s;
+  double chosen_diff = 1e100;
+
+  for (auto it : zone_max_diff_map) {
+    Zone* z = it.first;
+    double curr_diff = it.second;
+    if (!z->Acquire()) continue;
+      
+    if ((z->used_capacity_ > 0) && !z->IsFull() &&
+        z->capacity_ >= min_capacity) {
+      if (curr_diff >= 0 && curr_diff <= chosen_diff) {
+        if (allocated_zone != nullptr) {
+          s = allocated_zone->CheckRelease();
+          if (!s.ok()) {
+            IOStatus s_ = z->CheckRelease();
+            if (!s_.ok()) return s_;
+            return s;
+          }
+        }
+        allocated_zone = z;
+        chosen_diff = curr_diff;
+      } else {
+        s = z->CheckRelease();
+        if (!s.ok()) return s;
+      }
+    } else {
+      s = z->CheckRelease();
+      if (!s.ok()) return s;
+    }
   }
 
-  Zone* allocated_zone = nullptr;
-  uint64_t highest_contribution = 0;
-  IOStatus s = ChooseZoneWithHighestContrib(allocated_zone, highest_contribution, contribution_map, min_capacity);
-  if(!s.ok()) return s;
-
-  if(allocated_zone == nullptr) {
-    *best_diff_out = LIFETIME_DIFF_NOT_GOOD;
+  if(allocated_zone == nullptr)
     return IOStatus::OK();
-  }
-
-  nearest_real_success++;
   *best_diff_out = 0;
+
+  int digit_count = new_key.length();
+  double divisor = pow(10, digit_count-1);
+  chosen_diff /= divisor;
+
+  if(chosen_diff > zenfs_parameters_.nearest_newzone_threshold) {
+    *best_diff_out = LIFETIME_DIFF_COULD_BE_WORSE;
+    need_flag = true;
+    nearest_need_new++;
+  }
+  else
+    nearest_real_success++;
   *zone_out = allocated_zone;
 
   return IOStatus::OK();
