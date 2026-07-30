@@ -53,8 +53,8 @@ void ZenFS::LogZonewiseKeyRanges(FILE* log) {
     if(zone->IsEmpty()) continue;
     fprintf(log, "zone_id: %03lu, ", zone->id_);
     fprintf(log, "level: %d, ", zone->level_);
-    fprintf(log, "saturation: %0.2lf%%, ", 100.00 - 100.00 * zone->capacity_ / zone->max_capacity_);
-    fprintf(log, "valid_data: %0.2lf%%,", 100.00 * zone->used_capacity_ / zone->max_capacity_);
+    fprintf(log, "saturation: %3.2lf%%, ", 100.00 - 100.00 * zone->capacity_ / zone->max_capacity_);
+    fprintf(log, "valid_data: %3.2lf%%,", 100.00 * zone->used_capacity_ / zone->max_capacity_);
 
     std::vector<ZoneFile*> files_in_zone = per_zone_files[zone];
     for (ZoneFile* curr_file : files_in_zone) {

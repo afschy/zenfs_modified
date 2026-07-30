@@ -455,6 +455,7 @@ void ZonedBlockDevice::LogDetailedZoneState() {
 void ZonedBlockDevice::LogLevelwiseZoneStats() {
   int level_count = zenfs_parameters_.max_level;
   std::vector<std::vector<Zone*>> open_zones(level_count+1), closed_zones(level_count+1);
+  uint64_t used_space = 0, occupied_space = 0;
   
   for (Zone* z : io_zones) {
     bool open = z->IsUsed() && !z->IsFull();
@@ -462,7 +463,12 @@ void ZonedBlockDevice::LogLevelwiseZoneStats() {
 
     bool closed = z->capacity_ == 0;
     if (closed && z->level_ >= 0 && z->level_ <= level_count) closed_zones[z->level_].push_back(z);
+
+    used_space += z->used_capacity_;
+    occupied_space = z->max_capacity_ - z->capacity_;
   }
+
+  fprintf(zonestate_logfile_, "used_capacity = %ld MB, occupied_capacity = %ld MB\n", used_space >> 20, occupied_space >> 20);
 
   fprintf(zonestate_logfile_, "Open:\t");
   for (int i=0; i<=level_count; i++)
