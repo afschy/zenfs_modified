@@ -665,7 +665,7 @@ ZonedBlockDevice::MatchPlazaAdvanced(
     uint32_t min_capacity) {
   
   if (zonefile->level_ < 2 || !string_is_numeric(zonefile->smallest_.user_key().ToString()))
-    return MatchPlazaBase(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
+    return MatchArrivalTimeBased(zonefile, file_lifetime, best_diff_out, zone_out, min_capacity);
   
   std::lock_guard<std::mutex> lock(levelwise_files_mtx_);
   

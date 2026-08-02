@@ -1,9 +1,9 @@
-logname plaza-adv-0.3.log
-nearest_newzone_threshold 0.3
+logname plaza-adv-7.0.log
+nearest_newzone_threshold 7.0
 average_value_size 4096
 gc_pause_seconds 10
-gc_start_level 25
-gc_stop_level 35
+gc_start_level 5
+gc_stop_level 15
 gc_slope 3
 gc_type kImprovedGC
 reserve_zone_count 10

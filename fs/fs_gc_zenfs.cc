@@ -53,8 +53,8 @@ void ZenFS::LogZonewiseKeyRanges(FILE* log) {
     if(zone->IsEmpty()) continue;
     fprintf(log, "zone_id: %03lu, ", zone->id_);
     fprintf(log, "level: %d, ", zone->level_);
-    fprintf(log, "saturation: %3.2lf%%, ", 100.00 - 100.00 * zone->capacity_ / zone->max_capacity_);
-    fprintf(log, "valid_data: %3.2lf%%,", 100.00 * zone->used_capacity_ / zone->max_capacity_);
+    fprintf(log, "saturation: %03.2lf%%, ", 100.00 - 100.00 * zone->capacity_ / zone->max_capacity_);
+    fprintf(log, "valid_data: %03.2lf%%,", 100.00 * zone->used_capacity_ / zone->max_capacity_);
 
     std::vector<ZoneFile*> files_in_zone = per_zone_files[zone];
     for (ZoneFile* curr_file : files_in_zone) {
@@ -207,7 +207,9 @@ uint32_t ZenFS::SelectGarbageZonesImproved(ZenFSSnapshot& snapshot,
   
   std::vector<ZoneSnapshot> sorted_snapshots = snapshot.zones_;
   std::sort(sorted_snapshots.begin(), sorted_snapshots.end(), [](const ZoneSnapshot& a, const ZoneSnapshot& b) {
-    return a.used_capacity < b.used_capacity;
+    uint64_t total_a = a.max_capacity - a.capacity;
+    uint64_t total_b = b.max_capacity - b.capacity;
+    return 1.00*a.used_capacity/total_a < 1.00*b.used_capacity/total_b;
   });
   
   int free_target_percent = zbd_->zenfs_parameters_.gc_stop_level - free_percent;
@@ -222,8 +224,8 @@ uint32_t ZenFS::SelectGarbageZonesImproved(ZenFSSnapshot& snapshot,
   uint32_t reset_zone_count = 0;
   // uint64_t freed_bytes = 0;
   for (const auto& zone : sorted_snapshots) {
-    if(reset_zone_count >= free_target_zones) break;
-    if (zone.capacity != 0) continue;
+    if (reset_zone_count >= free_target_zones) break;
+    if (1.00*zone.capacity/zone.max_capacity > 0.5) continue;
     
     migrate_zones_start.emplace(zone.start);
     reset_zone_count++;

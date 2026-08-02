@@ -80,7 +80,6 @@ class Zone {
   uint32_t finish_count_; ///< Incremented on each call to Finish().
   PlacementPolicyType policy_;  ///< Placement policy of the first ZoneFile that wrote to this zone.
   bool flag_gc_reset_ = false;
-  bool open_ = false;
   
   std::vector<int> bytes_of_level;
   int level_; ///< LSM level of the first ZoneFile that wrote to this zone.
@@ -268,6 +267,8 @@ class ZonedBlockDevice {
    */
   IOStatus AllocateIOZone(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
                           Zone **out_zone, ZoneFile* zonefile);
+  IOStatus AllocateIOZoneNoLock(Env::WriteLifeTimeHint file_lifetime, IOType io_type,
+                                Zone **out_zone, ZoneFile* zonefile, uint64_t min_capacity);
   IOStatus AllocateMetaZone(Zone **out_meta_zone);
 
   uint64_t GetFreeSpace();

@@ -208,7 +208,7 @@ struct ZenfsParamContainer {
 
       else if(type == "nearest_newzone_threshold") {
         double value_double = std::stod(value);
-        if(value_double >= 0.0 && value_double <= 1.0)
+        if(value_double >= 0.0)
           nearest_newzone_threshold = value_double;
       }
 
